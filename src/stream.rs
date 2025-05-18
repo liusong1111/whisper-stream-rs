@@ -23,8 +23,8 @@ impl Default for TranscriptionConfig {
         Self {
             record_to_wav: None,
             language: Some("en".to_string()),
-            step_ms: 3000,
-            length_ms: 10000,
+            step_ms: 800,
+            length_ms: 5000,
             keep_ms: 200,
             max_tokens: 32,
             n_threads: 4,
@@ -74,9 +74,9 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
         let audio_input = AudioInput::new(config.step_ms);
         let audio_rx = audio_input.start_capture_16k(config.step_ms);
         let sample_rate = 16000;
-        let n_samples_len = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
-        let n_samples_keep = (sample_rate as f32 * (config.keep_ms as f32 / 1000.0)) as usize;
-        let mut pcmf32_old: Vec<f32> = Vec::with_capacity(n_samples_len);
+        let n_samples_window = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
+        let n_samples_overlap = (sample_rate as f32 * (config.keep_ms as f32 / 1000.0)) as usize;
+        let mut segment_window: Vec<f32> = Vec::with_capacity(n_samples_window);
         let mut state = match ctx.create_state() {
             Ok(s) => s,
             Err(e) => {
@@ -84,7 +84,6 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
                 return;
             }
         };
-        let mut last_text = None;
         // WAV writer setup (record original device audio, not resampled)
         let mut wav_writer = if let Some(path) = config.record_to_wav.clone() {
             println!("[Recording] Saving transcribed audio to {path}...");
@@ -106,18 +105,9 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
                     writer.write_sample(s).expect("Failed to write sample");
                 }
             }
-            // Take up to n_samples_len audio from previous iteration
-            let n_samples_take = std::cmp::min(pcmf32_old.len(), n_samples_keep + n_samples_len - pcmf32_new.len());
-            let mut pcmf32 = Vec::with_capacity(pcmf32_new.len() + n_samples_take);
-            if n_samples_take > 0 {
-                pcmf32.extend_from_slice(&pcmf32_old[pcmf32_old.len() - n_samples_take..]);
-            }
-            pcmf32.extend_from_slice(&pcmf32_new);
-            // Truncate to n_samples_len if needed
-            if pcmf32.len() > n_samples_len {
-                pcmf32 = pcmf32[pcmf32.len() - n_samples_len..].to_vec();
-            }
-            // 4. Transcribe
+            // Rolling segment window: append new samples
+            segment_window.extend_from_slice(&pcmf32_new);
+            // Emit partial transcript for the current segment window
             let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
             params.set_n_threads(config.n_threads);
             params.set_max_tokens(config.max_tokens);
@@ -128,7 +118,7 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             if let Some(ref lang) = config.language {
                 params.set_language(Some(lang));
             }
-            let res = state.full(params, &pcmf32);
+            let res = state.full(params, &segment_window);
             let mut text = String::new();
             match res {
                 Ok(_) => {
@@ -154,25 +144,71 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
                     continue;
                 }
             }
-            // Send the previous chunk as final, if any
-            if let Some(prev) = last_text.take() {
-                let _ = tx.send(TranscriptionStreamEvent::Transcript { text: prev, is_final: true });
-            }
-            // Send the current chunk as intermediate
+            // Emit the current segment window transcript as partial
             if !text.trim().is_empty() {
                 let _ = tx.send(TranscriptionStreamEvent::Transcript { text: text.clone(), is_final: false });
             }
-            last_text = Some(text);
-            // Keep part of the audio for next iteration
-            if pcmf32.len() > n_samples_keep {
-                pcmf32_old = pcmf32[pcmf32.len() - n_samples_keep..].to_vec();
-            } else {
-                pcmf32_old = pcmf32;
+            // If the segment window reaches max length, emit final and start new segment window with overlap
+            if segment_window.len() >= n_samples_window {
+                // Emit final transcript for this segment
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                params.set_n_threads(config.n_threads);
+                params.set_max_tokens(config.max_tokens);
+                params.set_print_special(false);
+                params.set_print_progress(false);
+                params.set_print_realtime(false);
+                params.set_print_timestamps(false);
+                if let Some(ref lang) = config.language {
+                    params.set_language(Some(lang));
+                }
+                let res = state.full(params, &segment_window);
+                let mut text = String::new();
+                if let Ok(_) = res {
+                    if let Ok(num_segments) = state.full_n_segments() {
+                        for i in 0..num_segments {
+                            if let Ok(seg) = state.full_get_segment_text(i) {
+                                text.push_str(&seg);
+                            }
+                        }
+                    }
+                }
+                if !text.trim().is_empty() {
+                    let _ = tx.send(TranscriptionStreamEvent::Transcript { text, is_final: true });
+                }
+                // Start new segment window with overlap
+                if n_samples_overlap > 0 && segment_window.len() > n_samples_overlap {
+                    segment_window = segment_window[segment_window.len() - n_samples_overlap..].to_vec();
+                } else {
+                    segment_window.clear();
+                }
             }
         }
-        // After the loop, send the last chunk as final if any
-        if let Some(prev) = last_text.take() {
-            let _ = tx.send(TranscriptionStreamEvent::Transcript { text: prev, is_final: true });
+        // After the loop, emit final for any remaining segment window
+        if !segment_window.is_empty() {
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_n_threads(config.n_threads);
+            params.set_max_tokens(config.max_tokens);
+            params.set_print_special(false);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            params.set_print_timestamps(false);
+            if let Some(ref lang) = config.language {
+                params.set_language(Some(lang));
+            }
+            let res = state.full(params, &segment_window);
+            let mut text = String::new();
+            if let Ok(_) = res {
+                if let Ok(num_segments) = state.full_n_segments() {
+                    for i in 0..num_segments {
+                        if let Ok(seg) = state.full_get_segment_text(i) {
+                            text.push_str(&seg);
+                        }
+                    }
+                }
+            }
+            if !text.trim().is_empty() {
+                let _ = tx.send(TranscriptionStreamEvent::Transcript { text, is_final: true });
+            }
         }
         // Finalize WAV writer if used
         if let Some(writer) = wav_writer {

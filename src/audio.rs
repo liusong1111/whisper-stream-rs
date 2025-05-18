@@ -49,7 +49,7 @@ impl AudioInput {
         std::thread::spawn(move || {
             let err_fn = |err| eprintln!("Stream error: {err}");
             let mut buffer = Vec::with_capacity(device_samples_per_step * channels);
-            let mut resampler = if need_resample {
+            let resampler = if need_resample {
                 Some(FftFixedInOut::<f32>::new(
                     device_sample_rate as usize,
                     16000,
