@@ -74,7 +74,8 @@ impl WavAudioRecorder {
     ///
     /// # Arguments
     /// * `audio_chunk`: A slice of `f32` audio samples (expected to be mono, 16kHz).
-    ///  Samples should be in the range -1.0 to 1.0.
+    ///
+	/// Samples should be in the range -1.0 to 1.0.
     pub fn write_audio_chunk(&mut self, audio_chunk: &[f32]) -> Result<(), WhisperStreamError> {
         if let Some(writer) = self.writer.as_mut() {
             for &sample_f32_original in audio_chunk {
