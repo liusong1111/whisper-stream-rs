@@ -71,7 +71,13 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             }
         };
         // 3. Start audio capture
-        let audio_input = AudioInput::new(config.step_ms);
+        let audio_input = match AudioInput::new(config.step_ms) {
+            Ok(input) => input,
+            Err(e) => {
+                send_err(&tx, format!("Failed to initialize audio input: {e}"));
+                return;
+            }
+        };
         let audio_rx = audio_input.start_capture_16k(config.step_ms);
         let sample_rate = 16000;
         let n_samples_window = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
