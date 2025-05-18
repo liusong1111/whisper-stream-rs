@@ -1,13 +1,23 @@
-use std::path::{PathBuf};
+use std::path::{PathBuf, Path};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Write, Read, Seek};
 use crate::error::WhisperStreamError;
-use log::info;
+use log::{info, warn};
+
+#[cfg(feature = "coreml")]
+use zip::ZipArchive;
+#[cfg(feature = "coreml")]
+use std::fs::File;
 
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 const MODEL_FILENAME: &str = "ggml-base.en.bin";
 
-/// Ensures the Whisper model is present, downloading if necessary.
+#[cfg(feature = "coreml")]
+const COREML_MODEL_URL_TEMPLATE: &str = "https://models.milan.place/whisper-cpp/metal/quantized/{}-encoder.mlmodelc.zip";
+#[cfg(feature = "coreml")]
+const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-base.en"; // Corresponds to ggml-base.en.bin
+
+/// Ensures the Whisper model (and CoreML model if 'coreml' feature is enabled) is present, downloading if necessary.
 pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
     let cache_dir = dirs::data_local_dir()
         .ok_or_else(|| WhisperStreamError::Io {
@@ -21,17 +31,98 @@ pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
 
     if !model_path.exists() {
         info!("Downloading Whisper model to {}...", model_path.display());
-
-        let mut resp = reqwest::blocking::get(MODEL_URL)
-            .map_err(WhisperStreamError::from)?;
-
-        let mut out = fs::File::create(&model_path).map_err(WhisperStreamError::from)?;
-
-        io::copy(&mut resp, &mut out).map_err(WhisperStreamError::from)?;
-
-        out.flush().map_err(WhisperStreamError::from)?;
-
-        info!("Model downloaded.");
+        download_file(MODEL_URL, &model_path)?;
+        info!("Whisper model downloaded.");
     }
-    Ok(model_path)
+
+    #[cfg(feature = "coreml")]
+    {
+        let coreml_base_name = BASE_MODEL_NAME_FOR_COREML;
+        let coreml_encoder_dir_name = format!("{}-encoder.mlmodelc", coreml_base_name);
+        let coreml_model_dir_path = cache_dir.join(&coreml_encoder_dir_name);
+
+        if !coreml_model_dir_path.exists() {
+            info!("CoreML model feature enabled.");
+            let coreml_model_zip_url = COREML_MODEL_URL_TEMPLATE.replace("{}", coreml_base_name);
+            let coreml_zip_filename = format!("{}-encoder.mlmodelc.zip", coreml_base_name);
+            let coreml_zip_path = cache_dir.join(&coreml_zip_filename);
+
+            info!("Downloading CoreML model from {} to {}...", coreml_model_zip_url, coreml_zip_path.display());
+            download_file(&coreml_model_zip_url, &coreml_zip_path)?;
+            info!("CoreML model ZIP downloaded.");
+
+            info!("Unzipping CoreML model to {}...", cache_dir.display());
+            if let Err(e) = unzip_file(&coreml_zip_path, &cache_dir) {
+                // Attempt to clean up the potentially corrupted zip file or partial extraction
+                let _ = fs::remove_file(&coreml_zip_path);
+                let _ = fs::remove_dir_all(&coreml_model_dir_path); // remove potentially partially extracted dir
+                error!("Failed to unzip CoreML model: {}. Please try deleting {} and {} and running again.", e, coreml_zip_path.display(), coreml_model_dir_path.display());
+                return Err(e);
+            }
+            info!("CoreML model unzipped.");
+
+            // Clean up the downloaded zip file after successful extraction
+            if fs::remove_file(&coreml_zip_path).is_err() {
+                warn!("Could not remove CoreML zip file: {}", coreml_zip_path.display());
+            }
+        } else {
+            info!("CoreML model already present at {}.", coreml_model_dir_path.display());
+        }
+    }
+
+    Ok(model_path) // Return path to the main .bin model
+}
+
+fn download_file(url: &str, path: &Path) -> Result<(), WhisperStreamError> {
+    let mut resp = reqwest::blocking::get(url)
+        .map_err(|e| WhisperStreamError::ModelFetch(format!("Failed to initiate download from {}: {}", url, e)))?;
+
+    if !resp.status().is_success() {
+        return Err(WhisperStreamError::ModelFetch(format!("Failed to download from {}: HTTP Status {}", url, resp.status())));
+    }
+
+    let mut out = fs::File::create(path)
+        .map_err(|e| WhisperStreamError::Io { source: e })?;
+
+    io::copy(&mut resp, &mut out)
+        .map_err(|e| WhisperStreamError::Io { source: e })?;
+
+    out.flush().map_err(|e| WhisperStreamError::Io { source: e })?;
+    Ok(())
+}
+
+#[cfg(feature = "coreml")]
+fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), WhisperStreamError> {
+    let file = File::open(zip_path).map_err(|e| WhisperStreamError::Io { source: e })?;
+    let mut archive = ZipArchive::new(file).map_err(|e| WhisperStreamError::ModelFetch(format!("Failed to open zip archive '{}': {}", zip_path.display(), e)))?;
+
+    for i in 0..archive.len() {
+        let mut file_in_zip = archive.by_index(i).map_err(|e| WhisperStreamError::ModelFetch(format!("Failed to access file in zip '{}': {}", zip_path.display(), e)))?;
+        let outpath = match file_in_zip.enclosed_name() {
+            Some(path) => dest_dir.join(path),
+            None => continue, // Skip if path is risky (e.g. ../)
+        };
+
+        if file_in_zip.name().ends_with('/') {
+            fs::create_dir_all(&outpath).map_err(|e| WhisperStreamError::Io { source: e })?;
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p).map_err(|e| WhisperStreamError::Io { source: e })?;
+                }
+            }
+            let mut outfile = fs::File::create(&outpath).map_err(|e| WhisperStreamError::Io { source: e })?;
+            io::copy(&mut file_in_zip, &mut outfile).map_err(|e| WhisperStreamError::Io { source: e })?;
+        }
+
+        // Restore permissions on macOS/Linux if necessary (usually for executables, not critical for .mlmodelc)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = file_in_zip.unix_mode() {
+                fs::set_permissions(&outpath, fs::Permissions::from_mode(mode)).map_err(|e| WhisperStreamError::Io{source: e})?;
+            }
+        }
+    }
+    Ok(())
 }

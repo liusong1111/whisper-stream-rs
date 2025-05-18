@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-whisper-rs = { version = "0.14.2", features = ["metal", "coreml", "log_backend"] }
+whisper-rs = { version = "0.14.2", default-features = false, features = ["metal", "log_backend"] }
 cpal = "0.15.3"
 reqwest = { version = "0.12", features = ["blocking"] }
 dirs = "5.0.1"
@@ -16,7 +16,13 @@ indicatif = "0.17.7"
 thiserror = "1.0"
 log = "0.4.21"
 env_logger = "0.11.3"
+zip = "0.6"
+
+[features]
+default = []
+coreml = ["whisper-rs/coreml"]
 
 [[example]]
 name = "commandline"
 path = "examples/commandline.rs"
+features = ["coreml"]
