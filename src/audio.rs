@@ -14,8 +14,8 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat, StreamConfig, InputCallbackInfo, StreamError as CpalStreamError, DeviceNameError, BuildStreamError, DevicesError, DefaultStreamConfigError};
-use rubato::{FftFixedInOut, Resampler, ResampleError as RubatoResampleError, ResamplerConstructionError};
+use cpal::{Sample, SampleFormat, StreamConfig, InputCallbackInfo, StreamError as CpalStreamError};
+use rubato::{FftFixedInOut, Resampler};
 use crate::error::WhisperStreamError; // Import custom error
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -138,7 +138,6 @@ impl AudioInput {
     {
         let mut buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels);
         let callback_stop_signal = stop_processing_signal.clone();
-        let tx_clone_for_error = tx.clone();
 
 
         device.build_input_stream(
@@ -276,15 +275,7 @@ impl AudioInput {
                     native_sample_rate as usize,
                     target_sample_rate as usize,
                     device_samples_per_step, // Max chunk size for resampler input
-                    audio_channels, // Number of channels. Rubato expects number of channels for multi-channel audio.
-                                    // If we always downmix before resampling, this could be 1.
-                                    // Current code downmixes *after* this resampler would be created if native_sample_rate != target_sample_rate
-                                    // Let's assume for now that if resampling is needed, it's on multi-channel data, then downmixed.
-                                    // OR, we ensure downmixing happens *before* this point if audio_channels > 1.
-                                    // The `process_audio_stream_internal` downmixes, so resampler should operate on mono if that's the target.
-                                    // The resampler in `process_audio_stream_internal` is applied *after* downmixing.
-                                    // This resampler here is for the case where the *entire stream setup* might need different parameters.
-                                    // Let's stick to `audio_channels` from config for now, consistent with `FftFixedInOut` docs.
+                    1, // Corrected: Always use 1 channel for mono after downmixing
                 ) {
                     Ok(r) => Some(r),
                     Err(e) => {

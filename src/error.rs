@@ -68,6 +68,6 @@ pub enum WhisperStreamError {
 // Manual conversion for CpalStreamError as it's an enum and needs specific handling
 impl From<CpalStreamError> for WhisperStreamError {
     fn from(err: CpalStreamError) -> Self {
-        WhisperStreamError::CpalRuntimeStreamError(format!("CPAL runtime stream error: {}", err))
+        WhisperStreamError::CpalRuntimeStreamError(err.to_string())
     }
 }

@@ -1,6 +1,6 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy, WhisperError};
+use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 use hound;
 
 use crate::audio::{AudioInput};
@@ -122,7 +122,20 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 return;
             }
         };
-        let mut wav_writer = if let Some(path_str) = config.record_to_wav.clone() {
+
+        // Initialize FullParams outside the loop
+        let mut params_full = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params_full.set_n_threads(config.n_threads);
+        params_full.set_max_tokens(config.max_tokens);
+        params_full.set_print_special(false);
+        params_full.set_print_progress(false);
+        params_full.set_print_realtime(false);
+        params_full.set_print_timestamps(false);
+        if let Some(ref lang) = config.language {
+            params_full.set_language(Some(lang));
+        }
+
+        let wav_writer = if let Some(path_str) = config.record_to_wav.clone() {
             println!("[Recording] Saving transcribed audio to {path_str}...");
             let spec = hound::WavSpec {
                 channels: audio_input.channels,
@@ -159,20 +172,13 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 }
             };
             segment_window.extend_from_slice(&pcmf32_new);
-            let mut params_full = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params_full.set_n_threads(config.n_threads);
-            params_full.set_max_tokens(config.max_tokens);
-            params_full.set_print_special(false);
-            params_full.set_print_progress(false);
-            params_full.set_print_realtime(false);
-            params_full.set_print_timestamps(false);
-            if let Some(ref lang) = config.language {
-                params_full.set_language(Some(lang));
-            }
+
+            // Use a clone of the pre-configured params_full for this iteration
             if let Err(e) = state.full(params_full.clone(), &segment_window) {
                 send_custom_error(&tx, WhisperStreamError::from(e));
                 continue;
             }
+
             let mut current_text = String::new();
             match state.full_n_segments() {
                 Ok(num_segments) => {
@@ -206,13 +212,7 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
             }
         }
         if !segment_window.is_empty() {
-            let mut params_final = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params_final.set_n_threads(config.n_threads);
-            params_final.set_max_tokens(config.max_tokens);
-            if let Some(ref lang) = config.language {
-                params_final.set_language(Some(lang));
-            }
-            if let Err(e) = state.full(params_final, &segment_window) {
+            if let Err(e) = state.full(params_full.clone(), &segment_window) {
                 send_custom_error(&tx, WhisperStreamError::from(e));
             } else {
                 let mut final_text = String::new();
@@ -237,7 +237,7 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 }
             }
         }
-        if let Some(mut writer) = wav_writer {
+        if let Some(writer) = wav_writer {
             if let Err(e) = writer.finalize() {
                 send_custom_error(&tx, WhisperStreamError::from(e));
             }
