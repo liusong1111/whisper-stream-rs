@@ -1,9 +1,6 @@
 use whisper_stream_rs::stream::{TranscriptionStreamParams, TranscriptionStreamEvent};
 use whisper_stream_rs::audio::AudioInput; // For AudioInput::available_input_devices
 use whisper_stream_rs::start_transcription_stream;
-use whisper_stream_rs::WhisperStreamError; // Import the custom error type
-use anyhow::Context; // For context method on errors
-// use anyhow::Ok; // anyhow::Result implicitly brings Ok into scope for return values
 use std::io::{stdout, Write}; // Added for stdout().flush()
 
 fn main() -> anyhow::Result<()> {
