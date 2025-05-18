@@ -25,8 +25,7 @@ coreml = ["whisper-rs/coreml"]
 [[example]]
 name = "commandline"
 path = "examples/commandline.rs"
-dependencies = ["clap"]
-features = ["coreml"]
+feature = ["coreml"]
 
 [dev-dependencies]
 clap = { version = "4.4", features = ["derive"] }
