@@ -7,6 +7,7 @@ pub mod audio;
 pub mod model;
 pub mod stream;
 pub mod error;
+pub mod audio_utils;
 
 pub use stream::{start_transcription_stream, TranscriptionStreamParams, TranscriptionStreamEvent};
 // Re-exporting AudioInput for `AudioInput::available_input_devices()` and direct audio capture if needed.

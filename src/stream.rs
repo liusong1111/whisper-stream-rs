@@ -1,12 +1,12 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
-use hound;
 use log::info;
 
 use crate::audio::{AudioInput};
 use crate::model::ensure_model;
 use crate::error::WhisperStreamError;
+use crate::audio_utils::{pad_audio_if_needed, WavAudioRecorder};
 
 // Default values for TranscriptionStreamParams
 const DEFAULT_RECORD_TO_WAV: Option<String> = None;
@@ -83,6 +83,7 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
+        const MIN_WHISPER_SAMPLES: usize = 16800; // 1050ms at 16kHz (increased buffer)
         let config = params;
 
         let model_path = match ensure_model() {
@@ -92,6 +93,10 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 return;
             }
         };
+
+        // Log system info from whisper-rs
+        let system_info = whisper_rs::print_system_info();
+        info!("Whisper System Info: \n{}", system_info);
 
         let ctx = match WhisperContext::new_with_params(
             model_path.to_str().unwrap_or("invalid_model_path"),
@@ -136,29 +141,26 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
             params_full.set_language(Some(lang));
         }
 
-        let wav_writer = if let Some(path_str) = config.record_to_wav.clone() {
-            info!("[Recording] Saving transcribed audio to {path_str}...");
-            let spec = hound::WavSpec {
-                channels: audio_input.channels,
-                sample_rate: audio_input.sample_rate,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            match hound::WavWriter::create(&path_str, spec) {
-                Ok(writer) => {
-                    if tx.send(TranscriptionStreamEvent::SystemMessage(format!("[Recording] Saving transcribed audio to {}...", path_str))).is_err() {
-                        return;
-                    }
-                    Some(writer)
-                }
-                Err(e) => {
-                    send_custom_error(&tx, WhisperStreamError::Hound { source: e });
-                    None
+        let mut wav_audio_recorder = match WavAudioRecorder::new(config.record_to_wav.as_deref()) {
+            Ok(recorder) => recorder,
+            Err(e) => {
+                send_custom_error(&tx, e);
+                // Decide if you want to return or continue without recording
+                // For now, let's assume we continue without recording if init fails
+                WavAudioRecorder::new(None).unwrap() // Creates a no-op recorder
+            }
+        };
+
+        if wav_audio_recorder.is_recording() {
+            if let Some(path_str) = config.record_to_wav.as_ref() {
+                info!("[Recording] Saving transcribed audio to {}...", path_str);
+                if tx.send(TranscriptionStreamEvent::SystemMessage(format!("[Recording] Saving transcribed audio to {}...", path_str))).is_err() {
+                    // If sending system message fails, maybe stop processing or just log
+                    return; // Example: stop if we can't send critical system messages
                 }
             }
-        } else {
-            None
-        };
+        }
+
         for pcmf32_new_result in audio_rx {
             let pcmf32_new = match pcmf32_new_result {
                 Ok(audio_data) => {
@@ -172,10 +174,17 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                     continue;
                 }
             };
+
+            // Write to WAV file if recording is active
+            if let Err(e) = wav_audio_recorder.write_audio_chunk(&pcmf32_new) {
+                send_custom_error(&tx, e); // Report error but continue processing audio for transcription
+            }
+
             segment_window.extend_from_slice(&pcmf32_new);
 
-            // Use a clone of the pre-configured params_full for this iteration
-            if let Err(e) = state.full(params_full.clone(), &segment_window) {
+            let audio_for_processing = pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
+
+            if let Err(e) = state.full(params_full.clone(), &audio_for_processing) {
                 send_custom_error(&tx, WhisperStreamError::from(e));
                 continue;
             }
@@ -213,7 +222,9 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
             }
         }
         if !segment_window.is_empty() {
-            if let Err(e) = state.full(params_full.clone(), &segment_window) {
+            let final_audio_for_processing = pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
+
+            if let Err(e) = state.full(params_full.clone(), &final_audio_for_processing) {
                 send_custom_error(&tx, WhisperStreamError::from(e));
             } else {
                 let mut final_text = String::new();
@@ -238,9 +249,15 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 }
             }
         }
-        if let Some(writer) = wav_writer {
-            if let Err(e) = writer.finalize() {
-                send_custom_error(&tx, WhisperStreamError::from(e));
+
+        match wav_audio_recorder.finalize() {
+            Ok(Some(msg)) => {
+                info!("{}", msg);
+                let _ = tx.send(TranscriptionStreamEvent::SystemMessage(msg));
+            }
+            Ok(None) => { /* No recording was active, nothing to report */ }
+            Err(e) => {
+                send_custom_error(&tx, e);
             }
         }
     });

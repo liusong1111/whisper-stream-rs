@@ -2,7 +2,6 @@ use whisper_stream_rs::stream::{TranscriptionStreamParams, TranscriptionStreamEv
 use whisper_stream_rs::audio::AudioInput; // For AudioInput::available_input_devices
 use whisper_stream_rs::start_transcription_stream;
 use std::io::{stdout, Write}; // Added for stdout().flush()
-use log;
 use env_logger;
 
 fn main() -> anyhow::Result<()> {

@@ -1,19 +1,22 @@
 use std::path::{PathBuf, Path};
 use std::fs;
-use std::io::{self, Write, Read, Seek};
+use std::io::{self, Write};
 use crate::error::WhisperStreamError;
-use log::{info, warn};
+use log::{info};
 
 #[cfg(feature = "coreml")]
 use zip::ZipArchive;
 #[cfg(feature = "coreml")]
 use std::fs::File;
+#[cfg(feature = "coreml")]
+use log::{warn};
+
 
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 const MODEL_FILENAME: &str = "ggml-base.en.bin";
 
 #[cfg(feature = "coreml")]
-const COREML_MODEL_URL_TEMPLATE: &str = "https://models.milan.place/whisper-cpp/metal/quantized/{}-encoder.mlmodelc.zip";
+const COREML_MODEL_URL_TEMPLATE: &str = "https://link.storjshare.io/raw/jw6gb7svwbcbhvzk6mtv3faunc3a/models.milan.place/whisper-cpp%2Fmetal/{}-encoder.mlmodelc.zip";
 #[cfg(feature = "coreml")]
 const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-base.en"; // Corresponds to ggml-base.en.bin
 
@@ -37,40 +40,46 @@ pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
 
     #[cfg(feature = "coreml")]
     {
-        let coreml_base_name = BASE_MODEL_NAME_FOR_COREML;
-        let coreml_encoder_dir_name = format!("{}-encoder.mlmodelc", coreml_base_name);
-        let coreml_model_dir_path = cache_dir.join(&coreml_encoder_dir_name);
-
-        if !coreml_model_dir_path.exists() {
-            info!("CoreML model feature enabled.");
-            let coreml_model_zip_url = COREML_MODEL_URL_TEMPLATE.replace("{}", coreml_base_name);
-            let coreml_zip_filename = format!("{}-encoder.mlmodelc.zip", coreml_base_name);
-            let coreml_zip_path = cache_dir.join(&coreml_zip_filename);
-
-            info!("Downloading CoreML model from {} to {}...", coreml_model_zip_url, coreml_zip_path.display());
-            download_file(&coreml_model_zip_url, &coreml_zip_path)?;
-            info!("CoreML model ZIP downloaded.");
-
-            info!("Unzipping CoreML model to {}...", cache_dir.display());
-            if let Err(e) = unzip_file(&coreml_zip_path, &cache_dir) {
-                // Attempt to clean up the potentially corrupted zip file or partial extraction
-                let _ = fs::remove_file(&coreml_zip_path);
-                let _ = fs::remove_dir_all(&coreml_model_dir_path); // remove potentially partially extracted dir
-                error!("Failed to unzip CoreML model: {}. Please try deleting {} and {} and running again.", e, coreml_zip_path.display(), coreml_model_dir_path.display());
-                return Err(e);
-            }
-            info!("CoreML model unzipped.");
-
-            // Clean up the downloaded zip file after successful extraction
-            if fs::remove_file(&coreml_zip_path).is_err() {
-                warn!("Could not remove CoreML zip file: {}", coreml_zip_path.display());
-            }
-        } else {
-            info!("CoreML model already present at {}.", coreml_model_dir_path.display());
-        }
+        ensure_coreml_model_if_enabled(&cache_dir)?;
     }
 
     Ok(model_path) // Return path to the main .bin model
+}
+
+#[cfg(feature = "coreml")]
+fn ensure_coreml_model_if_enabled(cache_dir: &Path) -> Result<(), WhisperStreamError> {
+    info!("CoreML feature enabled. Checking for CoreML model...");
+    let coreml_base_name = BASE_MODEL_NAME_FOR_COREML;
+    let coreml_encoder_dir_name = format!("{}-encoder.mlmodelc", coreml_base_name);
+    let coreml_model_dir_path = cache_dir.join(&coreml_encoder_dir_name);
+
+    if !coreml_model_dir_path.exists() {
+        let coreml_model_zip_url = COREML_MODEL_URL_TEMPLATE.replace("{}", coreml_base_name);
+        let coreml_zip_filename = format!("{}-encoder.mlmodelc.zip", coreml_base_name);
+        let coreml_zip_path = cache_dir.join(&coreml_zip_filename);
+
+        info!("Downloading CoreML model from {} to {}...", coreml_model_zip_url, coreml_zip_path.display());
+        download_file(&coreml_model_zip_url, &coreml_zip_path)?;
+        info!("CoreML model ZIP downloaded.");
+
+        info!("Unzipping CoreML model to {}...", cache_dir.display());
+        if let Err(e) = unzip_file(&coreml_zip_path, &cache_dir) {
+            // Attempt to clean up the potentially corrupted zip file or partial extraction
+            let _ = fs::remove_file(&coreml_zip_path);
+            let _ = fs::remove_dir_all(&coreml_model_dir_path); // remove potentially partially extracted dir
+            // The error is returned from this function, so no need for error! here, caller handles it.
+            return Err(e);
+        }
+        info!("CoreML model unzipped and available at {}.", coreml_model_dir_path.display());
+
+        // Clean up the downloaded zip file after successful extraction
+        if fs::remove_file(&coreml_zip_path).is_err() {
+            warn!("Could not remove CoreML zip file: {}", coreml_zip_path.display());
+        }
+    } else {
+        info!("CoreML model already present at {}.", coreml_model_dir_path.display());
+    }
+    Ok(())
 }
 
 fn download_file(url: &str, path: &Path) -> Result<(), WhisperStreamError> {
@@ -113,15 +122,6 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), WhisperStreamError
             }
             let mut outfile = fs::File::create(&outpath).map_err(|e| WhisperStreamError::Io { source: e })?;
             io::copy(&mut file_in_zip, &mut outfile).map_err(|e| WhisperStreamError::Io { source: e })?;
-        }
-
-        // Restore permissions on macOS/Linux if necessary (usually for executables, not critical for .mlmodelc)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Some(mode) = file_in_zip.unix_mode() {
-                fs::set_permissions(&outpath, fs::Permissions::from_mode(mode)).map_err(|e| WhisperStreamError::Io{source: e})?;
-            }
         }
     }
     Ok(())
