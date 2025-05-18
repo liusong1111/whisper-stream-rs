@@ -1,7 +1,12 @@
-//! Real-time streaming transcription library using whisper-rs and cpal
+//! whisper-stream-rs
+//!
+//! A library for performing real-time transcription using Whisper ASR models.
+//! It handles audio capture, processing, and streaming results.
 
-mod model;
 pub mod audio;
+pub mod model;
 pub mod stream;
 
-pub use stream::{start_transcription_stream, TranscriptionStreamEvent};
+pub use stream::{start_transcription_stream, TranscriptionStreamParams, TranscriptionStreamEvent};
+// Re-exporting AudioInput for `AudioInput::available_input_devices()` and direct audio capture if needed.
+pub use audio::AudioInput;

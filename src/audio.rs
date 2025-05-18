@@ -30,37 +30,79 @@ pub struct AudioInput {
     pub sample_rate: u32,
     pub channels: u16,
     pub buffer_size: usize,
+    step_duration_ms: u32,
 }
 
 impl AudioInput {
-    /// Creates a new `AudioInput` instance by querying the default system input device.
-    ///
-    /// It fetches the device's name, default configuration (sample rate, channels),
-    /// and calculates an initial buffer size based on the provided `step_ms`.
-    /// It also prints warnings if the default device does not have 1 channel (mono),
-    /// as mono audio is the target format after processing.
-    pub fn new(step_ms: u32) -> anyhow::Result<Self> {
+    /// Lists the names of all available audio input devices on the system.
+    pub fn available_input_devices() -> anyhow::Result<Vec<String>> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow::anyhow!("No input device available"))?;
-        let device_name = device.name().unwrap_or("<Unknown>".to_string());
+        let devices = host.input_devices().map_err(|e| anyhow::anyhow!("Failed to list input devices: {}", e))?;
+        let mut device_names = Vec::new();
+        for device in devices {
+            match device.name() {
+                Ok(name) => device_names.push(name),
+                Err(e) => {
+                    // Log or print a warning for devices whose names can't be fetched
+                    eprintln!("[Audio] Warning: Could not get name for an input device: {}", e);
+                    device_names.push("<Unnamed Device>".to_string()); // Add a placeholder
+                }
+            }
+        }
+        Ok(device_names)
+    }
+
+    /// Creates a new `AudioInput` instance, optionally targeting a specific input device.
+    ///
+    /// If `device_name_opt` is `None`, it uses the default system input device.
+    /// If `Some(name)`, it attempts to find and use the device with the given name.
+    /// The `step_ms` parameter defines the target duration for each audio chunk processed by `start_capture_16k`.
+    ///
+    /// It fetches the selected device's name, default configuration (sample rate, channels),
+    /// and calculates an initial buffer size based on the provided `step_ms`.
+    /// It also prints warnings if the selected device does not have 1 channel (mono),
+    /// as mono audio is the target format after processing.
+    pub fn new(device_name_opt: Option<&str>, step_ms: u32) -> anyhow::Result<Self> {
+        let host = cpal::default_host();
+        let device = match device_name_opt {
+            Some(name) => {
+                let mut devices = host.input_devices().map_err(|e| anyhow::anyhow!("Failed to list input devices: {}", e))?;
+                devices.find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                    .ok_or_else(|| anyhow::anyhow!("Input device named '{}' not found", name))?
+            }
+            None => {
+                host.default_input_device()
+                    .ok_or_else(|| anyhow::anyhow!("No default input device available"))?
+            }
+        };
+
+        let actual_device_name = device.name().unwrap_or("<Unknown>".to_string());
         let config = device
             .default_input_config()
-            .map_err(|e| anyhow::anyhow!("No default input config: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("No default input config for device '{}': {}", actual_device_name, e))?;
+
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
-        let buffer_size = (sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize;
-        println!("[Audio] Using input device: {}", device_name);
-        println!("[Audio] Default input config: {:?}", config);
+        // buffer_size is primarily for the Vec::with_capacity in process_audio_stream_internal,
+        // which is dynamically calculated there based on device_samples_per_step * audio_channels.
+        // We can keep this field for informational purposes or if other parts might use it.
+        // For now, let's calculate it based on the chosen device's sample rate and the step_ms for this AudioInput instance.
+        let buffer_size = (sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize * channels as usize;
+
+        println!("[Audio] Using input device: {}", actual_device_name);
+        println!("[Audio] Device input config: {:?}", config);
+
         if channels != 1 {
-            eprintln!("[Audio][Warning] Default input device has {} channels, but code expects 1 channel (mono).", channels);
+            // This warning is about the *source* device. Downmixing to mono happens later.
+            eprintln!("[Audio][Warning] Source input device '{}' has {} channels. It will be downmixed to mono.", actual_device_name, channels);
         }
+
         Ok(Self {
-            device_name,
+            device_name: actual_device_name,
             sample_rate,
             channels,
             buffer_size,
+            step_duration_ms: step_ms,
         })
     }
 
@@ -154,6 +196,7 @@ impl AudioInput {
     /// Starts the audio capture and processing thread, returning a `Receiver` for 16kHz mono f32 audio chunks.
     ///
     /// This is the primary method to begin receiving audio data suitable for Whisper ASR.
+    /// It uses the `step_duration_ms` configured for this `AudioInput` instance to determine chunk size.
     /// It performs the following steps in a spawned thread:
     /// 1. Initializes an audio input stream from the default device using its native configuration.
     /// 2. Sets up a resampler if the device's native sample rate is not 16kHz.
@@ -167,17 +210,30 @@ impl AudioInput {
     /// The `step_ms` parameter determines the duration of each audio chunk processed and sent.
     /// This chunk-based streaming allows a consumer (like `stream.rs`) to manage a
     /// rolling window of audio for continuous real-time transcription.
-    pub fn start_capture_16k(&self, step_ms: u32) -> Receiver<Vec<f32>> {
+    pub fn start_capture_16k(&self) -> Receiver<Vec<f32>> {
         let (tx_main, rx_main) = mpsc::channel();
         let host = cpal::default_host();
-        let device = host.default_input_device().expect("No input device available");
-        let input_config = device.default_input_config().expect("No default input config");
-        let stream_sample_format = input_config.sample_format(); // Renamed to avoid conflict
-        let stream_config_cpal: StreamConfig = input_config.into(); // Renamed to avoid conflict
+        // Re-fetch the device based on self.device_name to ensure we use the same one as in new()
+        // This is a bit redundant but ensures consistency if host state could change or if new() didn't store the cpal::Device itself.
+        // A better approach might be to store the cpal::Device in Self if its lifetime allows, or re-query by name.
+        // For now, re-querying by name stored in self.device_name.
+        let device = host.input_devices()
+            .map_err(|e| anyhow::anyhow!("Failed to list input devices during start_capture: {}", e))
+            .and_then(|mut devs|
+                devs.find(|d| d.name().map(|n| n == self.device_name).unwrap_or(false))
+                    .ok_or_else(|| anyhow::anyhow!("Audio device '{}' used during init not found at start_capture", self.device_name)))
+            .expect("Critical: Audio device disappeared or name changed since AudioInput::new"); // Panicking here as state is inconsistent
 
-        let device_actual_sample_rate = self.sample_rate;
-        let audio_channels = self.channels as usize;
-        let device_samples_per_step = (device_actual_sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize;
+        let input_config = device.default_input_config()
+            .expect(&format!("No default input config for device '{}' at start_capture", self.device_name));
+
+        let stream_sample_format = input_config.sample_format();
+        let stream_config_cpal: StreamConfig = input_config.into();
+
+        let device_actual_sample_rate = self.sample_rate; // This is from the config fetched in new() for the selected device
+        let audio_channels = self.channels as usize;      // Same here
+        // Use self.step_duration_ms for calculations
+        let device_samples_per_step = (device_actual_sample_rate as f32 * (self.step_duration_ms as f32 / 1000.0)) as usize;
         let need_resample = device_actual_sample_rate != 16000;
 
         let stop_processing_signal_arc = Arc::new(AtomicBool::new(false));

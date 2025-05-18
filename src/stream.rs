@@ -8,7 +8,7 @@ use crate::model::ensure_model;
 
 /// Configuration for the transcription stream.
 #[derive(Debug, Clone)]
-pub struct TranscriptionConfig {
+pub struct TranscriptionStreamParams {
     pub record_to_wav: Option<String>,
     pub language: Option<String>,
     pub step_ms: u32,
@@ -16,9 +16,10 @@ pub struct TranscriptionConfig {
     pub keep_ms: u32,
     pub max_tokens: i32,
     pub n_threads: i32,
+    pub audio_device_name: Option<String>,
 }
 
-impl Default for TranscriptionConfig {
+impl Default for TranscriptionStreamParams {
     fn default() -> Self {
         Self {
             record_to_wav: None,
@@ -28,6 +29,7 @@ impl Default for TranscriptionConfig {
             keep_ms: 200,
             max_tokens: 32,
             n_threads: 4,
+            audio_device_name: None,
         }
     }
 }
@@ -48,9 +50,16 @@ fn send_err<T: Into<String>>(tx: &mpsc::Sender<TranscriptionStreamEvent>, msg: T
 }
 
 /// Starts the transcription stream and returns a receiver for stream events.
-pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<TranscriptionStreamEvent> {
+///
+/// # Arguments
+/// * `params`: Configuration parameters for the audio capture and transcription process.
+pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver<TranscriptionStreamEvent> {
     let (tx, rx) = mpsc::channel();
+    let params_clone = params.clone();
+
     thread::spawn(move || {
+        let config = params_clone;
+
         // 1. Ensure model is present
         let model_path = match ensure_model() {
             Ok(p) => p,
@@ -71,14 +80,14 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             }
         };
         // 3. Start audio capture
-        let audio_input = match AudioInput::new(config.step_ms) {
+        let audio_input = match AudioInput::new(config.audio_device_name.as_deref(), config.step_ms) {
             Ok(input) => input,
             Err(e) => {
                 send_err(&tx, format!("Failed to initialize audio input: {e}"));
                 return;
             }
         };
-        let audio_rx = audio_input.start_capture_16k(config.step_ms);
+        let audio_rx = audio_input.start_capture_16k();
         let sample_rate = 16000;
         let n_samples_window = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
         let n_samples_overlap = (sample_rate as f32 * (config.keep_ms as f32 / 1000.0)) as usize;
