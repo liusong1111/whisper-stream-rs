@@ -1,13 +1,15 @@
 use whisper_stream_rs::stream::{TranscriptionStreamParams, TranscriptionStreamEvent};
-use whisper_stream_rs::audio::AudioInput;
+use whisper_stream_rs::audio::AudioInput; // For AudioInput::available_input_devices
 use whisper_stream_rs::start_transcription_stream;
+// use anyhow::Ok; // anyhow::Result implicitly brings Ok into scope for return values
+use std::io::{stdout, Write}; // Added for stdout().flush()
 
 fn main() -> anyhow::Result<()> {
     whisper_rs::install_logging_hooks();
 
-    // Optional: List available audio devices
     println!("Available audio input devices:");
-    match AudioInput::available_input_devices() {
+    let available_devices_result = AudioInput::available_input_devices(); // Call function before match
+    match available_devices_result { // Match on the result
         Ok(devices) => {
             if devices.is_empty() {
                 println!("  No input devices found.");
@@ -25,7 +27,7 @@ fn main() -> anyhow::Result<()> {
 
     let params = TranscriptionStreamParams {
         record_to_wav: Some("test_recording.wav".to_string()),
-        // To select a specific device by name:
+        // To select a specific device by name (case-insensitive):
         // audio_device_name: Some("Your Device Name Here".to_string()),
         ..Default::default()
     };
@@ -39,7 +41,6 @@ fn main() -> anyhow::Result<()> {
     println!("[Config] Recording to WAV: {}", params.record_to_wav.as_deref().unwrap_or("No"));
     println!("---");
 
-
     let rx = start_transcription_stream(params);
 
     println!("[System] Start speaking...");
@@ -48,23 +49,19 @@ fn main() -> anyhow::Result<()> {
         match event {
             TranscriptionStreamEvent::Transcript { text, is_final } => {
                 if is_final {
-                    println!("[FINAL] {}", text);
+                    // Ensure a newline before printing final transcript, if a partial one was just printed without one.
+                    println!("\r[FINAL] {}\x1b[K", text);
                 } else {
-                    // For non-final, clear the line and reprint, or just print continuously
-                    // depending on preference for live updates.
-                    // Simple continuous print for now:
-                    print!("\r{}\x1b[K", text); // Clear line, print text.
-                    // For more robust TUI, consider libraries like crossterm.
-                    use std::io::{stdout, Write};
-                    stdout().flush().unwrap(); // Important to make print! effective with
+                    print!("\r{}\x1b[K", text);
+                    if let Err(e) = stdout().flush() {
+                        eprintln!("[Error] Failed to flush stdout: {}", e);
+                    }
                 }
             }
             TranscriptionStreamEvent::SystemMessage(msg) => {
-                // Ensure newline after potentially incomplete live transcript
                 println!("\r\x1b[K[SYSTEM] {}", msg);
             }
             TranscriptionStreamEvent::Error(err) => {
-                // Ensure newline after potentially incomplete live transcript
                 eprintln!("\r\x1b[K[ERROR] {}", err);
             }
         }
