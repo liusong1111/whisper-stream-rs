@@ -1,31 +1,25 @@
 //! Handles audio capture, processing, and streaming for real-time transcription.
 //!
-//! This module is responsible for interfacing with the system's audio input devices,
-//! capturing raw audio data, and then processing it into a standardized format suitable
-//! for speech recognition. The key processing steps include:
-//! 1. Capturing audio based on a specified `step_ms` duration.
-//! 2. Downmixing multi-channel audio to mono.
-//! 3. Resampling the audio to 16kHz, which is expected by Whisper ASR models.
+//! This module interfaces with system audio input, captures raw data,
+//! and processes it into a standard format for speech recognition:
+//! 1. Captures audio in `step_ms` chunks.
+//! 2. Downmixes to mono.
+//! 3. Resamples to 16kHz for Whisper ASR.
 //!
-//! The processed audio is provided as a stream of `Vec<f32>` chunks via a channel Receiver.
-//! This chunk-based delivery is designed to be consumed by other parts of the application
-//! (e.g., `stream.rs`) that typically manage a rolling window of audio data for continuous
-//! transcription.
+//! Processed audio chunks (`Vec<f32>`) are streamed via a channel Receiver
+//! for consumption by other parts of the application (e.g., `stream.rs`)
+//! for continuous transcription.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, StreamConfig, InputCallbackInfo, StreamError as CpalStreamError};
 use rubato::{FftFixedInOut, Resampler};
-use crate::error::WhisperStreamError; // Import custom error
+use crate::error::WhisperStreamError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use log::{info, warn, error, debug};
 
-/// Encapsulates audio input device information and configuration for capture.
-///
-/// It stores details like the device name, native sample rate, and channel count,
-/// and provides the primary method (`start_capture_16k`) to begin streaming
-/// processed audio data.
+/// Encapsulates audio input device information and configuration.
 pub struct AudioInput {
     pub device_name: String,
     pub sample_rate: u32,
@@ -35,10 +29,10 @@ pub struct AudioInput {
 }
 
 impl AudioInput {
-    /// Lists the names of all available audio input devices on the system.
+    /// Lists names of available audio input devices.
     pub fn available_input_devices() -> Result<Vec<String>, WhisperStreamError> {
         let host = cpal::default_host();
-        let devices = host.input_devices().map_err(WhisperStreamError::from)?; // Uses From<DevicesError>
+        let devices = host.input_devices().map_err(WhisperStreamError::from)?;
         let mut device_names = Vec::new();
         for (index, device) in devices.enumerate() {
             let name = match device.name() {
@@ -53,22 +47,17 @@ impl AudioInput {
         Ok(device_names)
     }
 
-    /// Creates a new `AudioInput` instance, optionally targeting a specific input device.
+    /// Creates a new `AudioInput`.
     ///
-    /// If `device_name_opt` is `None`, it uses the default system input device.
-    /// If `Some(name)`, it attempts to find and use the device with the given name.
-    /// The `step_ms` parameter defines the target duration for each audio chunk processed by `start_capture_16k`.
-    ///
-    /// It fetches the selected device's name, default configuration (sample rate, channels),
-    /// and calculates an initial buffer size based on the provided `step_ms`.
-    /// It also prints warnings if the selected device does not have 1 channel (mono),
-    /// as mono audio is the target format after processing.
+    /// Uses default input if `device_name_opt` is `None`.
+    /// `step_ms` defines the audio chunk duration.
+    /// Fetches device config and warns if not mono, as mono is the target format.
     pub fn new(device_name_opt: Option<&str>, step_ms: u32) -> Result<Self, WhisperStreamError> {
         let host = cpal::default_host();
         let device = match device_name_opt {
             Some(name) => {
                 let devices = host.input_devices().map_err(WhisperStreamError::from)?;
-                devices.into_iter() // Use into_iter for owned iterator if needed, or iter()
+                devices.into_iter()
                     .find(|d| d.name().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
                     .ok_or_else(|| WhisperStreamError::AudioDevice(format!("Input device named '{}' not found (case-insensitive search)", name)))?
             }
@@ -110,41 +99,36 @@ impl AudioInput {
         })
     }
 
-    /// Internal helper function to build and manage the cpal input stream for a specific sample format.
+    /// Internal helper for cpal input stream and audio processing.
     ///
-    /// This generic function handles the core audio processing logic once the sample format is known:
-    /// - It sets up a cpal input stream with the provided `convert_sample` closure to transform
-    ///   input samples into `f32`.
-    /// - Buffers incoming audio data until `device_samples_per_step` frames are collected.
-    /// - Downmixes to mono if the input `audio_channels` is greater than 1.
-    /// - Resamples the mono audio to 16kHz if `resampler_opt` is `Some`.
-    /// - Sends the final processed `Vec<f32>` chunk through the `tx` channel sender.
+    /// Sets up cpal stream, converts samples to `f32`, buffers,
+    /// downmixes to mono, resamples to 16kHz (if needed),
+    /// and sends `Vec<f32>` chunks via `tx`.
     ///
     /// # Type Parameters
-    /// * `T`: The cpal sample type (e.g., `f32`, `i16`, `u16`).
-    /// * `F`: A closure that converts a sample of type `T` to `f32`.
+    /// * `T`: cpal sample type (`f32`, `i16`, `u16`).
+    /// * `F`: Closure to convert `T` to `f32`.
     fn process_audio_stream_internal<T, F>(
         device: &cpal::Device,
         config: &StreamConfig,
-        tx: Sender<Result<Vec<f32>, WhisperStreamError>>, // Channel sends Result
+        tx: Sender<Result<Vec<f32>, WhisperStreamError>>,
         audio_channels: usize,
-        device_samples_per_step: usize, // This is MONO samples after resampling, or native samples BEFORE downmix/resample. Let's clarify: native samples for one step.
+        device_samples_per_step: usize, // Native samples for one processing step.
         mut resampler_opt: Option<FftFixedInOut<f32>>,
-        err_fn_outer_tx: Sender<Result<Vec<f32>, WhisperStreamError>>, // Used to send stream errors
+        err_fn_outer_tx: Sender<Result<Vec<f32>, WhisperStreamError>>,
         convert_sample: F,
         stop_processing_signal: Arc<AtomicBool>,
-    ) -> Result<cpal::Stream, WhisperStreamError> // Return WhisperStreamError
+    ) -> Result<cpal::Stream, WhisperStreamError>
     where
         T: cpal::SizedSample,
         F: Fn(&T) -> f32 + Send + Sync + 'static,
     {
-        let mut main_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels * 2); // Larger main buffer
+        let mut main_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels * 2);
         let callback_stop_signal = stop_processing_signal.clone();
 
-        // Pre-allocate buffers for processing to reduce allocations in the hot loop
+        // Pre-allocate buffers to reduce allocations in the hot loop
         let mut interleaved_chunk_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels);
         let mut mono_chunk_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step);
-
 
         device.build_input_stream(
             config,
@@ -157,7 +141,7 @@ impl AudioInput {
 
                 while main_buffer.len() >= device_samples_per_step * audio_channels {
                     if callback_stop_signal.load(Ordering::Relaxed) {
-                        main_buffer.clear(); // Clear if stopping
+                        main_buffer.clear();
                         return;
                     }
 
@@ -179,19 +163,10 @@ impl AudioInput {
                             }
                         }
                     } else { // audio_channels > 2, manual downmix
+                        // Ensure enough samples for full frames before processing.
+                        // This check might be overly defensive if input length calculation is always correct.
                         if interleaved_chunk_buffer.chunks_exact(audio_channels).next().is_none() && !interleaved_chunk_buffer.is_empty() {
-                            // Not enough samples for a full frame, should not happen if logic is correct
-                            // but as a safeguard. Could also be an error.
-                            // For now, just log and skip, or this could be an error.
                             warn!("[Audio] Incomplete frame for multi-channel downmix. Buffer len: {}, channels: {}. Skipping.", interleaved_chunk_buffer.len(), audio_channels);
-                             // Or, return Err(WhisperStreamError::AudioStreamRuntime("Incomplete frame for downmix".to_string()))
-                            // For now, let's try to continue if this is transient, but this indicates a potential issue.
-                            // If this path is hit, it means `device_samples_per_step * audio_channels` was not a multiple of `audio_channels`.
-                            // However, `device_samples_per_step` should be mono samples, so this is native samples.
-                            // The `while main_buffer.len() >= device_samples_per_step * audio_channels` ensures enough data.
-                            // `interleaved_chunk_buffer.chunks_exact(audio_channels)` should not be empty if `interleaved_chunk_buffer` is not.
-                            // This case might be overly defensive if `device_samples_per_step` is correctly calculated.
-                            // Let's assume `device_samples_per_step * audio_channels` is frame-aligned.
                         }
                         for frame in interleaved_chunk_buffer.chunks_exact(audio_channels) {
                             mono_chunk_buffer.push(frame.iter().sum::<f32>() / audio_channels as f32);
@@ -208,20 +183,12 @@ impl AudioInput {
                         return;
                     }
 
-                    // At this point, mono_chunk_buffer contains the mono audio data.
-                    // The clone here is important if resampler_opt is None, as we pass ownership of the buffer.
-                    // If resampler is Some, process takes a slice, but returns an owned Vec.
                     let final_chunk_data_result = if let Some(resampler) = resampler_opt.as_mut() {
-                        // resampler.process expects &[P] where P: AsRef<[T]>.
-                        // So we pass a slice of slices: &[&[f32]].
-                        // Our mono_chunk_buffer is Vec<f32>.
-                        match resampler.process(&[&mono_chunk_buffer], None) {
+                        match resampler.process(&[&mono_chunk_buffer], None) { // Pass as slice of slices
                             Ok(mut output_frames) => {
                                 if output_frames.is_empty() {
-                                    // This isn't an error per se, but no data.
-                                    // This can happen if the input chunk is too small for the resampler to produce output.
-                                    // Continue to gather more data.
-                                    debug!("[Audio] Resampler processed but returned no frames. Input size: {}. Skipping chunk.", mono_chunk_buffer.len());
+                                    // Can happen if input chunk is too small for resampler.
+                                    debug!("[Audio] Resampler returned no frames. Input size: {}. Accumulating more data.", mono_chunk_buffer.len());
                                     continue;
                                 }
                                 Ok(output_frames.remove(0))
@@ -231,7 +198,7 @@ impl AudioInput {
                             }
                         }
                     } else {
-                        Ok(mono_chunk_buffer.clone()) // Clone because mono_chunk_buffer is reused
+                        Ok(mono_chunk_buffer.clone()) // Clone as mono_chunk_buffer is reused
                     };
 
                     match final_chunk_data_result {
@@ -246,7 +213,7 @@ impl AudioInput {
                                 debug!("[Audio] Final chunk is empty after processing/resampling. Skipping send.");
                             }
                         }
-                        Err(e) => { // This is WhisperStreamError from resampling or other processing
+                        Err(e) => {
                              error!("[Audio] Processing chunk failed: {}", e);
                              if tx.send(Err(e)).is_err() {
                                 error!("[Audio] Receiver dropped while sending processing error. Signalling to stop.");
@@ -260,55 +227,47 @@ impl AudioInput {
             move |err: CpalStreamError| {
                 error!("[Audio] Stream error: {}", err);
                 let _ = err_fn_outer_tx.send(Err(WhisperStreamError::from(err)));
-                // Consider stopping processing here too via stop_processing_signal
             },
             None,
-        ).map_err(WhisperStreamError::from) // Converts BuildStreamError
+        ).map_err(WhisperStreamError::from)
     }
 
-    /// Starts the audio capture and processing thread, returning a `Receiver` for 16kHz mono f32 audio chunks.
+    /// Starts audio capture, returning a `Receiver` for 16kHz mono f32 audio chunks.
     ///
-    /// This is the primary method to begin receiving audio data suitable for Whisper ASR.
-    /// It uses the `step_duration_ms` configured for this `AudioInput` instance to determine chunk size.
-    /// It performs the following steps in a spawned thread:
-    /// 1. Initializes an audio input stream from the default device using its native configuration.
-    /// 2. Sets up a resampler if the device's native sample rate is not 16kHz.
-    /// 3. In a loop, for each `step_ms` interval:
-    ///    a. Collects raw audio samples.
-    ///    b. Converts samples to `f32` format.
-    ///    c. Downmixes to mono if the input is multi-channel.
-    ///    d. Resamples to 16kHz mono if necessary.
-    ///    e. Sends the resulting `Vec<f32>` audio chunk via the returned channel `Receiver`.
-    ///
-    /// The `step_ms` parameter determines the duration of each audio chunk processed and sent.
-    /// This chunk-based streaming allows a consumer (like `stream.rs`) to manage a
-    /// rolling window of audio for continuous real-time transcription.
-    pub fn start_capture_16k(&self) -> Receiver<Result<Vec<f32>, WhisperStreamError>> { // Receiver sends Result
+    /// This is the primary method to get audio for Whisper ASR.
+    /// `step_duration_ms` determines chunk size.
+    /// In a spawned thread, it:
+    /// 1. Initializes cpal input stream.
+    /// 2. Sets up resampler if native sample rate != 16kHz.
+    /// 3. Continuously collects, converts, downmixes, resamples, and sends audio chunks.
+    pub fn start_capture_16k(&self) -> Receiver<Result<Vec<f32>, WhisperStreamError>> {
         let (tx, rx) = mpsc::channel();
         let device_name_clone = self.device_name.clone();
         let step_duration_ms_clone = self.step_duration_ms;
 
         let stop_processing_signal = Arc::new(AtomicBool::new(false));
-        let _thread_stop_signal = stop_processing_signal.clone(); // Renamed to avoid unused variable warning, assuming it might be used later or was for debugging
+        // _thread_stop_signal kept for potential future use or if stream lifetime needs explicit management with it.
+        let _thread_stop_signal = stop_processing_signal.clone();
 
-        let tx_for_err_fn = tx.clone(); // For the stream error callback
-        let tx_for_data_cb = tx.clone(); // For the data callback
+        let tx_for_err_fn = tx.clone();
+        let tx_for_data_cb = tx.clone();
 
         info!("[Audio] Starting capture for device '{}'. Native SR: {}, Target SR: {}, Channels: {}, Chunk ms: {}",
             self.device_name, self.sample_rate, 16000, self.channels, self.step_duration_ms);
 
         std::thread::spawn(move || {
             let host = cpal::default_host();
-            let device = match host.input_devices().map_err(WhisperStreamError::from) {
-                Ok(mut devices) => devices.find(|d| d.name().map(|n| n == device_name_clone).unwrap_or(false)),
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                    return;
-                }
-            }.or_else(|| host.default_input_device())
-             .ok_or_else(|| WhisperStreamError::AudioDevice(format!("Audio device '{}' not found and no default available.", device_name_clone)));
+            let device_result = host.input_devices().map_err(WhisperStreamError::from)
+                .and_then(|mut devices| {
+                    devices.find(|d| d.name().map_or(false, |n| n == device_name_clone))
+                        .ok_or_else(|| WhisperStreamError::AudioDevice(format!("Named input device '{}' not found.", device_name_clone)))
+                })
+                .or_else(|_| { // If named device not found or error in listing, try default
+                    host.default_input_device()
+                        .ok_or_else(|| WhisperStreamError::AudioDevice(format!("Audio device '{}' not found and no default available.", device_name_clone)))
+                });
 
-            let device = match device {
+            let device = match device_result {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx.send(Err(e));
@@ -327,14 +286,15 @@ impl AudioInput {
             let native_sample_rate = config.sample_rate().0;
             let audio_channels = config.channels() as usize;
             let target_sample_rate = 16000;
+            // device_samples_per_step is the number of *native* samples for one chunk before any processing.
             let device_samples_per_step = (native_sample_rate as f32 * (step_duration_ms_clone as f32 / 1000.0)) as usize;
 
             let resampler_opt = if native_sample_rate != target_sample_rate {
                 match FftFixedInOut::<f32>::new(
                     native_sample_rate as usize,
                     target_sample_rate as usize,
-                    device_samples_per_step, // Max chunk size for resampler input
-                    1, // Corrected: Always use 1 channel for mono after downmixing
+                    device_samples_per_step, // Max input chunk size for resampler
+                    1, // Output is always mono
                 ) {
                     Ok(r) => Some(r),
                     Err(e) => {
@@ -348,25 +308,21 @@ impl AudioInput {
                 None
             };
 
-            info!("[Audio] Starting capture. Native SR: {}, Target SR: {}, Channels: {}, Chunk Samples: {}", native_sample_rate, target_sample_rate, audio_channels, device_samples_per_step);
+            info!("[Audio] Starting capture. Native SR: {}, Target SR: {}, Channels: {}, Chunk Samples (native): {}", native_sample_rate, target_sample_rate, audio_channels, device_samples_per_step);
 
             let stream_result = match config.sample_format() {
                 SampleFormat::F32 => {
-                    let convert_sample = |s: &f32| *s;
                     Self::process_audio_stream_internal::<f32, _>(
-                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, convert_sample, stop_processing_signal.clone())
+                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &f32| *s, stop_processing_signal.clone())
                 }
                 SampleFormat::I16 => {
-                    let convert_sample = |s: &i16| s.to_float_sample();
                     Self::process_audio_stream_internal::<i16, _>(
-                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, convert_sample, stop_processing_signal.clone())
+                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &i16| s.to_float_sample(), stop_processing_signal.clone())
                 }
                 SampleFormat::U16 => {
-                    let convert_sample = |s: &u16| s.to_float_sample();
                     Self::process_audio_stream_internal::<u16, _>(
-                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, convert_sample, stop_processing_signal.clone())
+                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &u16| s.to_float_sample(), stop_processing_signal.clone())
                 }
-                // Handling other formats might require specific conversions or error reporting.
                 other_format => {
                     let err_msg = format!("Unsupported sample format: {:?}", other_format);
                     error!("[Audio] {}", err_msg);
@@ -378,24 +334,24 @@ impl AudioInput {
             match stream_result {
                 Ok(stream) => {
                     if stream.play().is_err() {
-                        error!("[Audio] Failed to play stream: {}", device_name_clone); // Simplified error message
+                        error!("[Audio] Failed to play stream for device: {}", device_name_clone);
                         let _ = tx.send(Err(WhisperStreamError::AudioDevice("Failed to play stream".to_string())));
                         return;
                     }
-                    // The stream is now playing. We need to keep this thread alive to process stop signals.
-                    // The actual audio processing happens in cpal's callback threads.
+                    // Stream is playing; cpal callbacks handle audio processing.
+                    // This thread keeps alive to monitor stop_processing_signal.
                     loop {
                         if stop_processing_signal.load(Ordering::Relaxed) {
                             debug!("[Audio] Stop signal received in main capture thread for device '{}'. Stream will be dropped.", device_name_clone);
                             break;
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(100)); // Check for stop signal
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
-                    // Dropping the stream here will stop the cpal callbacks
+                    // Dropping `stream` here stops cpal callbacks.
                 }
                 Err(e) => {
                     error!("[Audio] Failed to build input stream for device '{}': {}", device_name_clone, e);
-                    let _ = tx.send(Err(e)); // Send the specific error
+                    let _ = tx.send(Err(e));
                     return;
                 }
             }
@@ -405,11 +361,10 @@ impl AudioInput {
         rx
     }
 
-    /// Signals the audio capture thread to stop processing and clean up.
+    /// Signals the audio capture thread to stop.
     ///
-    /// This sets an atomic flag that the capture thread periodically checks.
-    /// Once the flag is set, the capture thread will stop processing new audio data,
-    /// allow the cpal stream to be dropped (which stops hardware capture), and then exit.
+    /// Sets an atomic flag checked by the capture thread, which will then
+    /// stop processing, allow cpal stream to drop, and exit.
     pub fn stop_capture(stop_signal: Arc<AtomicBool>) {
         debug!("[Audio] Setting stop signal for audio capture.");
         stop_signal.store(true, Ordering::Relaxed);
