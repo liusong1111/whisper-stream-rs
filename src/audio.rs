@@ -184,12 +184,10 @@ impl AudioInput {
 
                     match final_chunk_result {
                         Ok(final_chunk) => {
-                            if !final_chunk.is_empty() {
-                                if tx.send(Ok(final_chunk)).is_err() {
-                                    eprintln!("[Audio] Receiver dropped. Signalling to stop audio processing.");
-                                    callback_stop_signal.store(true, Ordering::Relaxed);
-                                    return;
-                                }
+                            if !final_chunk.is_empty() && tx.send(Ok(final_chunk)).is_err() {
+                                eprintln!("[Audio] Receiver dropped. Signalling to stop audio processing.");
+                                callback_stop_signal.store(true, Ordering::Relaxed);
+                                return;
                             }
                         }
                         Err(e) => {
