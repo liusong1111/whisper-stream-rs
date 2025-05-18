@@ -41,6 +41,13 @@ pub fn start_transcription_stream() -> Receiver<String> {
         let n_samples_len = (sample_rate as f32 * (LENGTH_MS as f32 / 1000.0)) as usize;
         let n_samples_keep = (sample_rate as f32 * (KEEP_MS as f32 / 1000.0)) as usize;
         let mut pcmf32_old: Vec<f32> = Vec::with_capacity(n_samples_len);
+        let mut state = match ctx.create_state() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(format!("Failed to create state: {e}"));
+                return;
+            }
+        };
         for pcmf32_new in audio_rx {
             // Take up to n_samples_len audio from previous iteration
             let n_samples_take = std::cmp::min(pcmf32_old.len(), n_samples_keep + n_samples_len - pcmf32_new.len());
@@ -62,13 +69,6 @@ pub fn start_transcription_stream() -> Receiver<String> {
             params.set_print_realtime(false);
             params.set_print_timestamps(false);
             params.set_language(Some("en"));
-            let mut state = match ctx.create_state() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(format!("Failed to create state: {e}"));
-                    continue;
-                }
-            };
             let res = state.full(params, &pcmf32);
             match res {
                 Ok(_) => {
