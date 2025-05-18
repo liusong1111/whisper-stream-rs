@@ -1,6 +1,8 @@
 use whisper_stream_rs::stream::{TranscriptionStreamParams, TranscriptionStreamEvent};
 use whisper_stream_rs::audio::AudioInput; // For AudioInput::available_input_devices
 use whisper_stream_rs::start_transcription_stream;
+use whisper_stream_rs::WhisperStreamError; // Import the custom error type
+use anyhow::Context; // For context method on errors
 // use anyhow::Ok; // anyhow::Result implicitly brings Ok into scope for return values
 use std::io::{stdout, Write}; // Added for stdout().flush()
 
@@ -62,7 +64,10 @@ fn main() -> anyhow::Result<()> {
                 println!("\r\x1b[K[SYSTEM] {}", msg);
             }
             TranscriptionStreamEvent::Error(err) => {
-                eprintln!("\r\x1b[K[ERROR] {}", err);
+                // err is now WhisperStreamError
+                // We can use anyhow to add context for the command-line application
+                let app_error = anyhow::Error::new(err).context("An error occurred in the transcription stream");
+                eprintln!("\r\x1b[K[ERROR] {:#}", app_error); // Use {:#} for multi-line display with anyhow
             }
         }
     }

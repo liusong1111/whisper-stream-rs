@@ -1,10 +1,11 @@
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
+use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy, WhisperError};
 use hound;
 
 use crate::audio::{AudioInput};
 use crate::model::ensure_model;
+use crate::error::WhisperStreamError;
 
 // Default values for TranscriptionStreamParams
 const DEFAULT_RECORD_TO_WAV: Option<String> = None;
@@ -59,18 +60,18 @@ impl Default for TranscriptionStreamParams {
 }
 
 /// Configuration for the transcription stream.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TranscriptionStreamEvent {
     Transcript {
         text: String,
         is_final: bool,
     },
     SystemMessage(String),
-    Error(String),
+    Error(WhisperStreamError),
 }
 
-fn send_err<T: Into<String>>(tx: &mpsc::Sender<TranscriptionStreamEvent>, msg: T) {
-    let _ = tx.send(TranscriptionStreamEvent::Error(msg.into()));
+fn send_custom_error(tx: &Sender<TranscriptionStreamEvent>, error: WhisperStreamError) {
+    let _ = tx.send(TranscriptionStreamEvent::Error(error));
 }
 
 /// Starts the transcription stream and returns a receiver for stream events.
@@ -83,30 +84,29 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
     thread::spawn(move || {
         let config = params;
 
-        // 1. Ensure model is present
         let model_path = match ensure_model() {
             Ok(p) => p,
             Err(e) => {
-                send_err(&tx, format!("Model error: {e}"));
+                send_custom_error(&tx, e);
                 return;
             }
         };
-        // 2. Initialize whisper context
+
         let ctx = match WhisperContext::new_with_params(
-            model_path.to_str().unwrap(),
+            model_path.to_str().unwrap_or("invalid_model_path"),
             WhisperContextParameters::default(),
         ) {
             Ok(c) => c,
             Err(e) => {
-                send_err(&tx, format!("Failed to load model: {e}"));
+                send_custom_error(&tx, WhisperStreamError::from(e));
                 return;
             }
         };
-        // 3. Start audio capture
+
         let audio_input = match AudioInput::new(config.audio_device_name.as_deref(), config.step_ms) {
             Ok(input) => input,
             Err(e) => {
-                send_err(&tx, format!("Failed to initialize audio input: {e}"));
+                send_custom_error(&tx, e);
                 return;
             }
         };
@@ -118,102 +118,86 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
         let mut state = match ctx.create_state() {
             Ok(s) => s,
             Err(e) => {
-                send_err(&tx, format!("Failed to create state: {e}"));
+                send_custom_error(&tx, WhisperStreamError::from(e));
                 return;
             }
         };
-        // WAV writer setup (record original device audio, not resampled)
-        let mut wav_writer = if let Some(path) = config.record_to_wav.clone() {
-            println!("[Recording] Saving transcribed audio to {path}...");
+        let mut wav_writer = if let Some(path_str) = config.record_to_wav.clone() {
+            println!("[Recording] Saving transcribed audio to {path_str}...");
             let spec = hound::WavSpec {
                 channels: audio_input.channels,
                 sample_rate: audio_input.sample_rate,
                 bits_per_sample: 16,
                 sample_format: hound::SampleFormat::Int,
             };
-            Some(hound::WavWriter::create(path, spec).expect("Failed to create WAV file"))
+            match hound::WavWriter::create(&path_str, spec) {
+                Ok(writer) => {
+                    if tx.send(TranscriptionStreamEvent::SystemMessage(format!("[Recording] Saving transcribed audio to {}...", path_str))).is_err() {
+                        return;
+                    }
+                    Some(writer)
+                }
+                Err(e) => {
+                    send_custom_error(&tx, WhisperStreamError::Hound { source: e });
+                    None
+                }
+            }
         } else {
             None
         };
-        for pcmf32_new in audio_rx {
-            // Write to WAV if enabled (convert f32 to i16 for WAV)
-            if let Some(writer) = wav_writer.as_mut() {
-                for &sample in &pcmf32_new {
-                    let s = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-                    writer.write_sample(s).expect("Failed to write sample");
+        for pcmf32_new_result in audio_rx {
+            let pcmf32_new = match pcmf32_new_result {
+                Ok(audio_data) => {
+                    if audio_data.is_empty() {
+                        continue;
+                    }
+                    audio_data
                 }
-            }
-            // Rolling segment window: append new samples
+                Err(audio_err) => {
+                    send_custom_error(&tx, audio_err);
+                    continue;
+                }
+            };
             segment_window.extend_from_slice(&pcmf32_new);
-            // Emit partial transcript for the current segment window
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params.set_n_threads(config.n_threads);
-            params.set_max_tokens(config.max_tokens);
-            params.set_print_special(false);
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-            params.set_print_timestamps(false);
+            let mut params_full = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params_full.set_n_threads(config.n_threads);
+            params_full.set_max_tokens(config.max_tokens);
+            params_full.set_print_special(false);
+            params_full.set_print_progress(false);
+            params_full.set_print_realtime(false);
+            params_full.set_print_timestamps(false);
             if let Some(ref lang) = config.language {
-                params.set_language(Some(lang));
+                params_full.set_language(Some(lang));
             }
-            let res = state.full(params, &segment_window);
-            let mut text = String::new();
-            match res {
-                Ok(_) => {
-                    let num_segments = match state.full_n_segments() {
-                        Ok(n) => n,
-                        Err(e) => {
-                            send_err(&tx, format!("Segment error: {e}"));
-                            continue;
-                        }
-                    };
+            if let Err(e) = state.full(params_full.clone(), &segment_window) {
+                send_custom_error(&tx, WhisperStreamError::from(e));
+                continue;
+            }
+            let mut current_text = String::new();
+            match state.full_n_segments() {
+                Ok(num_segments) => {
                     for i in 0..num_segments {
                         match state.full_get_segment_text(i) {
-                            Ok(seg) => text.push_str(&seg),
+                            Ok(seg) => current_text.push_str(&seg),
                             Err(e) => {
-                                send_err(&tx, format!("Segment text error: {e}"));
-                                continue;
+                                send_custom_error(&tx, WhisperStreamError::from(e));
+                                break;
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    send_err(&tx, format!("Transcription error: {e}"));
+                    send_custom_error(&tx, WhisperStreamError::from(e));
                     continue;
                 }
             }
-            // Emit the current segment window transcript as partial
-            if !text.trim().is_empty() {
-                let _ = tx.send(TranscriptionStreamEvent::Transcript { text: text.clone(), is_final: false });
+            if !current_text.trim().is_empty() {
+                let _ = tx.send(TranscriptionStreamEvent::Transcript { text: current_text.clone(), is_final: false });
             }
-            // If the segment window reaches max length, emit final and start new segment window with overlap
             if segment_window.len() >= n_samples_window {
-                // Emit final transcript for this segment
-                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-                params.set_n_threads(config.n_threads);
-                params.set_max_tokens(config.max_tokens);
-                params.set_print_special(false);
-                params.set_print_progress(false);
-                params.set_print_realtime(false);
-                params.set_print_timestamps(false);
-                if let Some(ref lang) = config.language {
-                    params.set_language(Some(lang));
+                if !current_text.trim().is_empty() {
+                    let _ = tx.send(TranscriptionStreamEvent::Transcript { text: current_text, is_final: true });
                 }
-                let res = state.full(params, &segment_window);
-                let mut text = String::new();
-                if let Ok(_) = res {
-                    if let Ok(num_segments) = state.full_n_segments() {
-                        for i in 0..num_segments {
-                            if let Ok(seg) = state.full_get_segment_text(i) {
-                                text.push_str(&seg);
-                            }
-                        }
-                    }
-                }
-                if !text.trim().is_empty() {
-                    let _ = tx.send(TranscriptionStreamEvent::Transcript { text, is_final: true });
-                }
-                // Start new segment window with overlap
                 if n_samples_overlap > 0 && segment_window.len() > n_samples_overlap {
                     segment_window = segment_window[segment_window.len() - n_samples_overlap..].to_vec();
                 } else {
@@ -221,37 +205,42 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 }
             }
         }
-        // After the loop, emit final for any remaining segment window
         if !segment_window.is_empty() {
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params.set_n_threads(config.n_threads);
-            params.set_max_tokens(config.max_tokens);
-            params.set_print_special(false);
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-            params.set_print_timestamps(false);
+            let mut params_final = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params_final.set_n_threads(config.n_threads);
+            params_final.set_max_tokens(config.max_tokens);
             if let Some(ref lang) = config.language {
-                params.set_language(Some(lang));
+                params_final.set_language(Some(lang));
             }
-            let res = state.full(params, &segment_window);
-            let mut text = String::new();
-            if let Ok(_) = res {
-                if let Ok(num_segments) = state.full_n_segments() {
-                    for i in 0..num_segments {
-                        if let Ok(seg) = state.full_get_segment_text(i) {
-                            text.push_str(&seg);
+            if let Err(e) = state.full(params_final, &segment_window) {
+                send_custom_error(&tx, WhisperStreamError::from(e));
+            } else {
+                let mut final_text = String::new();
+                match state.full_n_segments() {
+                    Ok(num_segments) => {
+                        for i in 0..num_segments {
+                            match state.full_get_segment_text(i) {
+                                Ok(seg) => final_text.push_str(&seg),
+                                Err(e) => {
+                                    send_custom_error(&tx, WhisperStreamError::from(e));
+                                    break;
+                                }
+                            }
                         }
                     }
+                    Err(e) => {
+                        send_custom_error(&tx, WhisperStreamError::from(e));
+                    }
+                }
+                if !final_text.trim().is_empty() {
+                    let _ = tx.send(TranscriptionStreamEvent::Transcript { text: final_text, is_final: true });
                 }
             }
-            if !text.trim().is_empty() {
-                let _ = tx.send(TranscriptionStreamEvent::Transcript { text, is_final: true });
-            }
         }
-        // Finalize WAV writer if used
-        if let Some(writer) = wav_writer {
-            writer.finalize().expect("Failed to finalize WAV file");
-            println!("[Done] Saved transcribed audio");
+        if let Some(mut writer) = wav_writer {
+            if let Err(e) = writer.finalize() {
+                send_custom_error(&tx, WhisperStreamError::from(e));
+            }
         }
     });
     rx
