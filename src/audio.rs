@@ -128,7 +128,7 @@ impl AudioInput {
         config: &StreamConfig,
         tx: Sender<Result<Vec<f32>, WhisperStreamError>>, // Channel sends Result
         audio_channels: usize,
-        device_samples_per_step: usize,
+        device_samples_per_step: usize, // This is MONO samples after resampling, or native samples BEFORE downmix/resample. Let's clarify: native samples for one step.
         mut resampler_opt: Option<FftFixedInOut<f32>>,
         err_fn_outer_tx: Sender<Result<Vec<f32>, WhisperStreamError>>, // Used to send stream errors
         convert_sample: F,
@@ -138,8 +138,12 @@ impl AudioInput {
         T: cpal::SizedSample,
         F: Fn(&T) -> f32 + Send + Sync + 'static,
     {
-        let mut buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels);
+        let mut main_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels * 2); // Larger main buffer
         let callback_stop_signal = stop_processing_signal.clone();
+
+        // Pre-allocate buffers for processing to reduce allocations in the hot loop
+        let mut interleaved_chunk_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step * audio_channels);
+        let mut mono_chunk_buffer: Vec<f32> = Vec::with_capacity(device_samples_per_step);
 
 
         device.build_input_stream(
@@ -149,30 +153,76 @@ impl AudioInput {
                     return;
                 }
 
-                buffer.extend(data.iter().map(&convert_sample));
+                main_buffer.extend(data.iter().map(&convert_sample));
 
-                while buffer.len() >= device_samples_per_step * audio_channels {
+                while main_buffer.len() >= device_samples_per_step * audio_channels {
                     if callback_stop_signal.load(Ordering::Relaxed) {
-                        buffer.clear();
+                        main_buffer.clear(); // Clear if stopping
                         return;
                     }
-                    let mut chunk: Vec<f32> = buffer.drain(..device_samples_per_step * audio_channels).collect();
 
-                    if audio_channels > 1 {
-                        chunk = chunk
-                            .chunks_exact(audio_channels)
-                            .map(|frame| frame.iter().sum::<f32>() / audio_channels as f32)
-                            .collect();
+                    interleaved_chunk_buffer.clear();
+                    interleaved_chunk_buffer.extend(main_buffer.drain(..device_samples_per_step * audio_channels));
+
+                    mono_chunk_buffer.clear();
+                    let downmix_result: Result<(), WhisperStreamError> = if audio_channels == 1 {
+                        mono_chunk_buffer.extend_from_slice(&interleaved_chunk_buffer);
+                        Ok(())
+                    } else if audio_channels == 2 {
+                        match whisper_rs::convert_stereo_to_mono_audio(&interleaved_chunk_buffer) {
+                            Ok(converted_mono) => {
+                                mono_chunk_buffer.extend_from_slice(&converted_mono);
+                                Ok(())
+                            }
+                            Err(e) => {
+                                Err(WhisperStreamError::AudioStreamRuntime(format!("Stereo to mono conversion failed: {:?}", e)))
+                            }
+                        }
+                    } else { // audio_channels > 2, manual downmix
+                        if interleaved_chunk_buffer.chunks_exact(audio_channels).next().is_none() && !interleaved_chunk_buffer.is_empty() {
+                            // Not enough samples for a full frame, should not happen if logic is correct
+                            // but as a safeguard. Could also be an error.
+                            // For now, just log and skip, or this could be an error.
+                            warn!("[Audio] Incomplete frame for multi-channel downmix. Buffer len: {}, channels: {}. Skipping.", interleaved_chunk_buffer.len(), audio_channels);
+                             // Or, return Err(WhisperStreamError::AudioStreamRuntime("Incomplete frame for downmix".to_string()))
+                            // For now, let's try to continue if this is transient, but this indicates a potential issue.
+                            // If this path is hit, it means `device_samples_per_step * audio_channels` was not a multiple of `audio_channels`.
+                            // However, `device_samples_per_step` should be mono samples, so this is native samples.
+                            // The `while main_buffer.len() >= device_samples_per_step * audio_channels` ensures enough data.
+                            // `interleaved_chunk_buffer.chunks_exact(audio_channels)` should not be empty if `interleaved_chunk_buffer` is not.
+                            // This case might be overly defensive if `device_samples_per_step` is correctly calculated.
+                            // Let's assume `device_samples_per_step * audio_channels` is frame-aligned.
+                        }
+                        for frame in interleaved_chunk_buffer.chunks_exact(audio_channels) {
+                            mono_chunk_buffer.push(frame.iter().sum::<f32>() / audio_channels as f32);
+                        }
+                        Ok(())
+                    };
+
+                    if let Err(e) = downmix_result {
+                        error!("[Audio] Downmixing audio failed: {}", e);
+                        if tx.send(Err(e)).is_err() {
+                            error!("[Audio] Receiver dropped while sending downmix error. Signalling to stop.");
+                        }
+                        callback_stop_signal.store(true, Ordering::Relaxed);
+                        return;
                     }
 
-                    let final_chunk_result = if let Some(resampler) = resampler_opt.as_mut() {
-                        match resampler.process(&[chunk], None) {
+                    // At this point, mono_chunk_buffer contains the mono audio data.
+                    // The clone here is important if resampler_opt is None, as we pass ownership of the buffer.
+                    // If resampler is Some, process takes a slice, but returns an owned Vec.
+                    let final_chunk_data_result = if let Some(resampler) = resampler_opt.as_mut() {
+                        // resampler.process expects &[P] where P: AsRef<[T]>.
+                        // So we pass a slice of slices: &[&[f32]].
+                        // Our mono_chunk_buffer is Vec<f32>.
+                        match resampler.process(&[&mono_chunk_buffer], None) {
                             Ok(mut output_frames) => {
                                 if output_frames.is_empty() {
-                                    // This isn't an error per se, but no data. Could be logged.
-                                    // For now, skip sending empty data.
-                                    // eprintln!("[Audio] Resampler processed but returned no frames. Skipping chunk.");
-                                    continue; // Skip sending this empty chunk
+                                    // This isn't an error per se, but no data.
+                                    // This can happen if the input chunk is too small for the resampler to produce output.
+                                    // Continue to gather more data.
+                                    debug!("[Audio] Resampler processed but returned no frames. Input size: {}. Skipping chunk.", mono_chunk_buffer.len());
+                                    continue;
                                 }
                                 Ok(output_frames.remove(0))
                             }
@@ -181,28 +231,33 @@ impl AudioInput {
                             }
                         }
                     } else {
-                        Ok(chunk)
+                        Ok(mono_chunk_buffer.clone()) // Clone because mono_chunk_buffer is reused
                     };
 
-                    match final_chunk_result {
+                    match final_chunk_data_result {
                         Ok(final_chunk) => {
-                            if !final_chunk.is_empty() && tx.send(Ok(final_chunk)).is_err() {
-                                error!("[Audio] Receiver dropped. Signalling to stop audio processing.");
-                                callback_stop_signal.store(true, Ordering::Relaxed);
-                                return;
+                            if !final_chunk.is_empty() {
+                                if tx.send(Ok(final_chunk)).is_err() {
+                                    error!("[Audio] Receiver dropped. Signalling to stop audio processing.");
+                                    callback_stop_signal.store(true, Ordering::Relaxed);
+                                    return;
+                                }
+                            } else {
+                                debug!("[Audio] Final chunk is empty after processing/resampling. Skipping send.");
                             }
                         }
-                        Err(e) => {
+                        Err(e) => { // This is WhisperStreamError from resampling or other processing
+                             error!("[Audio] Processing chunk failed: {}", e);
                              if tx.send(Err(e)).is_err() {
-                                error!("[Audio] Receiver dropped while sending resample error. Signalling to stop.");
-                                callback_stop_signal.store(true, Ordering::Relaxed);
-                                return;
+                                error!("[Audio] Receiver dropped while sending processing error. Signalling to stop.");
                             }
+                            callback_stop_signal.store(true, Ordering::Relaxed);
+                            return;
                         }
                     }
                 }
             },
-            move |err: CpalStreamError| { // Use err_fn_outer_tx to send error
+            move |err: CpalStreamError| {
                 error!("[Audio] Stream error: {}", err);
                 let _ = err_fn_outer_tx.send(Err(WhisperStreamError::from(err)));
                 // Consider stopping processing here too via stop_processing_signal
