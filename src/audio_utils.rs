@@ -19,7 +19,7 @@ pub fn pad_audio_if_needed(audio_segment: &[f32], min_samples: usize) -> Cow<'_,
         let mut padded_segment = Vec::with_capacity(min_samples);
         padded_segment.extend_from_slice(audio_segment);
         let padding_needed = min_samples - audio_segment.len();
-        padded_segment.extend(std::iter::repeat(0.0f32).take(padding_needed));
+        padded_segment.extend(std::iter::repeat_n(0.0f32, padding_needed));
         Cow::Owned(padded_segment)
     } else {
         Cow::Borrowed(audio_segment)
@@ -74,7 +74,7 @@ impl WavAudioRecorder {
     ///
     /// # Arguments
     /// * `audio_chunk`: A slice of `f32` audio samples (expected to be mono, 16kHz).
-    ///                  Samples should be in the range -1.0 to 1.0.
+    ///  Samples should be in the range -1.0 to 1.0.
     pub fn write_audio_chunk(&mut self, audio_chunk: &[f32]) -> Result<(), WhisperStreamError> {
         if let Some(writer) = self.writer.as_mut() {
             for &sample_f32_original in audio_chunk {
@@ -87,7 +87,7 @@ impl WavAudioRecorder {
 
                 // Clamp to [-1.0, 1.0) then scale and cast
                 // The range of f32 is [-1.0, 1.0]. `1.0 - f32::EPSILON` is effectively the largest value less than 1.0.
-                let clamped_sample = sample_f32.clamp(-1.0, 1.0 - std::f32::EPSILON);
+                let clamped_sample = sample_f32.clamp(-1.0, 1.0 - f32::EPSILON);
                 // Multiply by (i16::MAX as f32 + 1.0) which is 32768.0.
                 // This maps -1.0 to -32768 (i16::MIN) and values approaching 1.0 to 32767 (i16::MAX).
                 let sample_i16 = (clamped_sample * (i16::MAX as f32 + 1.0)) as i16;

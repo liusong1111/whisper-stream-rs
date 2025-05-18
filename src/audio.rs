@@ -259,7 +259,7 @@ impl AudioInput {
             let host = cpal::default_host();
             let device_result = host.input_devices().map_err(WhisperStreamError::from)
                 .and_then(|mut devices| {
-                    devices.find(|d| d.name().map_or(false, |n| n == device_name_clone))
+                    devices.find(|d| d.name().is_ok_and(|n| n == device_name_clone))
                         .ok_or_else(|| WhisperStreamError::AudioDevice(format!("Named input device '{}' not found.", device_name_clone)))
                 })
                 .or_else(|_| { // If named device not found or error in listing, try default
