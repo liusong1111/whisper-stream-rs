@@ -6,30 +6,54 @@ use hound;
 use crate::audio::{AudioInput};
 use crate::model::ensure_model;
 
+// Default values for TranscriptionStreamParams
+const DEFAULT_RECORD_TO_WAV: Option<String> = None;
+// const DEFAULT_LANGUAGE: Option<String> = Some("en".to_string()); // This cannot be const, handled in impl Default
+const DEFAULT_STEP_MS: u32 = 800;
+const DEFAULT_LENGTH_MS: u32 = 5000;
+const DEFAULT_KEEP_MS: u32 = 200;
+const DEFAULT_MAX_TOKENS: i32 = 32;
+const DEFAULT_N_THREADS: i32 = 4; // Fallback, actual default uses available_parallelism
+const DEFAULT_AUDIO_DEVICE_NAME: Option<String> = None;
+
 /// Configuration for the transcription stream.
 #[derive(Debug, Clone)]
 pub struct TranscriptionStreamParams {
+    /// Optional path to save the recorded audio as a WAV file.
     pub record_to_wav: Option<String>,
+    /// Target language for transcription. `None` for auto-detection.
     pub language: Option<String>,
+    /// Duration of each audio chunk processed by `AudioInput` in milliseconds.
     pub step_ms: u32,
+    /// Total duration of the audio window considered for a single transcription, in milliseconds.
     pub length_ms: u32,
+    /// Duration of audio from the previous segment to keep for context, in milliseconds.
     pub keep_ms: u32,
+    /// Maximum number of tokens to generate per audio segment.
     pub max_tokens: i32,
+    /// Number of threads to use for Whisper model computation.
     pub n_threads: i32,
+    /// Optional human-readable device name passed to `AudioInput::new`; `None` means default system device.
     pub audio_device_name: Option<String>,
 }
 
 impl Default for TranscriptionStreamParams {
     fn default() -> Self {
+        // For non-const defaults like String options, initialize them directly here.
+        let default_lang = Some("en".to_string());
+        let default_n_threads = std::thread::available_parallelism()
+            .map(|nzu| nzu.get() as i32)
+            .unwrap_or(DEFAULT_N_THREADS); // Fallback if parallelism can't be determined
+
         Self {
-            record_to_wav: None,
-            language: Some("en".to_string()),
-            step_ms: 800,
-            length_ms: 5000,
-            keep_ms: 200,
-            max_tokens: 32,
-            n_threads: 4,
-            audio_device_name: None,
+            record_to_wav: DEFAULT_RECORD_TO_WAV, // This is None, which is const
+            language: default_lang, // Initialized above
+            step_ms: DEFAULT_STEP_MS,
+            length_ms: DEFAULT_LENGTH_MS,
+            keep_ms: DEFAULT_KEEP_MS,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            n_threads: default_n_threads,
+            audio_device_name: DEFAULT_AUDIO_DEVICE_NAME, // This is None, which is const
         }
     }
 }
@@ -55,10 +79,9 @@ fn send_err<T: Into<String>>(tx: &mpsc::Sender<TranscriptionStreamEvent>, msg: T
 /// * `params`: Configuration parameters for the audio capture and transcription process.
 pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver<TranscriptionStreamEvent> {
     let (tx, rx) = mpsc::channel();
-    let params_clone = params.clone();
 
     thread::spawn(move || {
-        let config = params_clone;
+        let config = params;
 
         // 1. Ensure model is present
         let model_path = match ensure_model() {

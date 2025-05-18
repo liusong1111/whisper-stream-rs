@@ -39,13 +39,12 @@ impl AudioInput {
         let host = cpal::default_host();
         let devices = host.input_devices().map_err(|e| anyhow::anyhow!("Failed to list input devices: {}", e))?;
         let mut device_names = Vec::new();
-        for device in devices {
+        for (index, device) in devices.enumerate() {
             match device.name() {
                 Ok(name) => device_names.push(name),
                 Err(e) => {
-                    // Log or print a warning for devices whose names can't be fetched
-                    eprintln!("[Audio] Warning: Could not get name for an input device: {}", e);
-                    device_names.push("<Unnamed Device>".to_string()); // Add a placeholder
+                    eprintln!("[Audio] Warning: Could not get name for input device #{}: {}", index, e);
+                    device_names.push(format!("Device #{} (Name Error)", index));
                 }
             }
         }
@@ -67,8 +66,8 @@ impl AudioInput {
         let device = match device_name_opt {
             Some(name) => {
                 let mut devices = host.input_devices().map_err(|e| anyhow::anyhow!("Failed to list input devices: {}", e))?;
-                devices.find(|d| d.name().map(|n| n == name).unwrap_or(false))
-                    .ok_or_else(|| anyhow::anyhow!("Input device named '{}' not found", name))?
+                devices.find(|d| d.name().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+                    .ok_or_else(|| anyhow::anyhow!("Input device named '{}' not found (case-insensitive search)", name))?
             }
             None => {
                 host.default_input_device()
@@ -213,84 +212,113 @@ impl AudioInput {
     pub fn start_capture_16k(&self) -> Receiver<Vec<f32>> {
         let (tx_main, rx_main) = mpsc::channel();
         let host = cpal::default_host();
-        // Re-fetch the device based on self.device_name to ensure we use the same one as in new()
-        // This is a bit redundant but ensures consistency if host state could change or if new() didn't store the cpal::Device itself.
-        // A better approach might be to store the cpal::Device in Self if its lifetime allows, or re-query by name.
-        // For now, re-querying by name stored in self.device_name.
-        let device = host.input_devices()
-            .map_err(|e| anyhow::anyhow!("Failed to list input devices during start_capture: {}", e))
-            .and_then(|mut devs|
-                devs.find(|d| d.name().map(|n| n == self.device_name).unwrap_or(false))
-                    .ok_or_else(|| anyhow::anyhow!("Audio device '{}' used during init not found at start_capture", self.device_name)))
-            .expect("Critical: Audio device disappeared or name changed since AudioInput::new"); // Panicking here as state is inconsistent
 
-        let input_config = device.default_input_config()
-            .expect(&format!("No default input config for device '{}' at start_capture", self.device_name));
-
-        let stream_sample_format = input_config.sample_format();
-        let stream_config_cpal: StreamConfig = input_config.into();
-
-        let device_actual_sample_rate = self.sample_rate; // This is from the config fetched in new() for the selected device
-        let audio_channels = self.channels as usize;      // Same here
-        // Use self.step_duration_ms for calculations
-        let device_samples_per_step = (device_actual_sample_rate as f32 * (self.step_duration_ms as f32 / 1000.0)) as usize;
-        let need_resample = device_actual_sample_rate != 16000;
-
-        let stop_processing_signal_arc = Arc::new(AtomicBool::new(false));
-
-        let resampler_option = if need_resample {
-            Some(FftFixedInOut::<f32>::new(
-                device_actual_sample_rate as usize,
-                16000,
-                device_samples_per_step,
-                1, // Input to resampler is always 1 channel (mono)
-            ).expect("Failed to create resampler"))
-        } else {
-            None
-        };
+        // Clone self.device_name and self.sample_rate, etc. so they can be moved into the thread
+        let device_name_clone = self.device_name.clone();
+        let device_actual_sample_rate = self.sample_rate;
+        let audio_channels_usize = self.channels as usize;
+        let step_duration_ms_clone = self.step_duration_ms;
+        let stop_processing_signal_arc = Arc::new(AtomicBool::new(false)); // Moved here to be captured by the thread
 
         std::thread::spawn(move || {
-            let err_fn_callback = |err: StreamError| eprintln!("[Audio] Stream error: {err}");
+            let device = match host.input_devices() {
+                Ok(mut devs) => {
+                    devs.find(|d| d.name().map(|n| n.eq_ignore_ascii_case(&device_name_clone)).unwrap_or(false))
+                }
+                Err(e) => {
+                    eprintln!("[Audio] Critical: Failed to list input devices at stream start: {}. Thread terminating.", e);
+                    return; // Exit thread
+                }
+            };
+
+            let device = match device {
+                Some(d) => d,
+                None => {
+                    eprintln!("[Audio] Critical: Audio device '{}' used during init not found at stream start. Thread terminating.", device_name_clone);
+                    return; // Exit thread
+                }
+            };
+
+            let input_config = match device.default_input_config() {
+                Ok(conf) => conf,
+                Err(e) => {
+                    eprintln!("[Audio] Critical: No default input config for device '{}': {}. Thread terminating.", device_name_clone, e);
+                    return; // Exit thread
+                }
+            };
+
+            let stream_sample_format = input_config.sample_format();
+            let stream_config_cpal: StreamConfig = input_config.into();
+
+            let device_samples_per_step = (device_actual_sample_rate as f32 * (step_duration_ms_clone as f32 / 1000.0)) as usize;
+            let need_resample = device_actual_sample_rate != 16000;
+
             let thread_stop_signal = stop_processing_signal_arc.clone();
+
+            let resampler_option = if need_resample {
+                Some(FftFixedInOut::<f32>::new(
+                    device_actual_sample_rate as usize,
+                    16000,
+                    device_samples_per_step,
+                    1,
+                ).expect("Failed to create resampler")) // This expect is on resampler creation, less critical than device vanishing
+            } else {
+                None
+            };
+
+            let err_fn_callback = |err: StreamError| eprintln!("[Audio] Stream error: {err}");
 
             let stream_result = match stream_sample_format {
                 SampleFormat::F32 => Self::process_audio_stream_internal::<f32, _>(
-                    &device, &stream_config_cpal, tx_main.clone(), audio_channels, device_samples_per_step,
+                    &device, &stream_config_cpal, tx_main.clone(), audio_channels_usize, device_samples_per_step,
                     resampler_option,
                     err_fn_callback.clone(),
                     |sample_val| *sample_val,
                     thread_stop_signal.clone(),
                 ),
                 SampleFormat::I16 => Self::process_audio_stream_internal::<i16, _>(
-                    &device, &stream_config_cpal, tx_main.clone(), audio_channels, device_samples_per_step,
+                    &device, &stream_config_cpal, tx_main.clone(), audio_channels_usize, device_samples_per_step,
                     resampler_option,
                     err_fn_callback.clone(),
                     |sample_val| *sample_val as f32 / 32768.0,
                     thread_stop_signal.clone(),
                 ),
                 SampleFormat::U16 => Self::process_audio_stream_internal::<u16, _>(
-                    &device, &stream_config_cpal, tx_main.clone(), audio_channels, device_samples_per_step,
+                    &device, &stream_config_cpal, tx_main.clone(), audio_channels_usize, device_samples_per_step,
                     resampler_option,
                     err_fn_callback.clone(),
                     |sample_val| (*sample_val as f32 / u16::MAX as f32) * 2.0 - 1.0,
                     thread_stop_signal.clone(),
                 ),
                 unsupported_format => {
-                    eprintln!("[Audio] Unsupported sample format: {:?}", unsupported_format);
-                    Err(Error::msg(format!("Unsupported sample format: {:?}", unsupported_format)))
+                    eprintln!("[Audio] Unsupported sample format: {:?}. Thread terminating.", unsupported_format);
+                    // To propagate this specific error via channel, TranscriptionStreamEvent would need an error variant
+                    // For now, just printing and terminating thread. Channel will close.
+                    return;
                 }
             };
 
             match stream_result {
                 Ok(stream) => {
                     if let Err(e) = stream.play() {
-                        eprintln!("[Audio] Failed to play stream: {:?}", e);
-                    } else {
-                        std::thread::park(); // Keep thread alive while stream is playing
+                        eprintln!("[Audio] Failed to play stream: {:?}. Thread terminating.", e);
+                        return; // Exit thread
+                    }
+                    // Park loop for graceful exit
+                    loop {
+                        if stop_processing_signal_arc.load(Ordering::Relaxed) { // Use the original Arc here
+                            eprintln!("[Audio] Stop signal received. Pausing stream and exiting audio thread.");
+                            if let Err(e) = stream.pause() { // Attempt to pause
+                                eprintln!("[Audio] Error pausing stream: {:?}", e);
+                            }
+                            break;
+                        }
+                        std::thread::park_timeout(std::time::Duration::from_millis(500)); // Check every 500ms
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Audio] Failed to build audio stream: {:?}", e);
+                    eprintln!("[Audio] Failed to build audio stream: {:?}. Thread terminating.", e);
+                    // Channel will close, notifying the receiver loop
                 }
             }
         });
