@@ -2,6 +2,7 @@ use std::path::{PathBuf};
 use std::fs;
 use std::io::{self, Write};
 use crate::error::WhisperStreamError;
+use log::info;
 
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 const MODEL_FILENAME: &str = "ggml-base.en.bin";
@@ -19,7 +20,7 @@ pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
     let model_path = cache_dir.join(MODEL_FILENAME);
 
     if !model_path.exists() {
-        println!("Downloading Whisper model to {}...", model_path.display());
+        info!("Downloading Whisper model to {}...", model_path.display());
 
         let mut resp = reqwest::blocking::get(MODEL_URL)
             .map_err(WhisperStreamError::from)?;
@@ -30,7 +31,7 @@ pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
 
         out.flush().map_err(WhisperStreamError::from)?;
 
-        println!("Model downloaded.");
+        info!("Model downloaded.");
     }
     Ok(model_path)
 }

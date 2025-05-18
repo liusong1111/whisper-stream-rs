@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-whisper-rs = { version = "0.14.2", features = ["metal", "coreml"] }
+whisper-rs = { version = "0.14.2", features = ["metal", "coreml", "log_backend"] }
 cpal = "0.15.3"
 reqwest = { version = "0.12", features = ["blocking"] }
 dirs = "5.0.1"

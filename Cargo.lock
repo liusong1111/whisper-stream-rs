@@ -2119,6 +2119,7 @@ version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b6dca51a101d32fa551d66d34fef899a39d5c8b68b6ea5adf4080b9ec37bb58"
 dependencies = [
+ "log",
  "whisper-rs-sys",
 ]
 

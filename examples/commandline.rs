@@ -2,8 +2,15 @@ use whisper_stream_rs::stream::{TranscriptionStreamParams, TranscriptionStreamEv
 use whisper_stream_rs::audio::AudioInput; // For AudioInput::available_input_devices
 use whisper_stream_rs::start_transcription_stream;
 use std::io::{stdout, Write}; // Added for stdout().flush()
+use log;
+use env_logger;
 
 fn main() -> anyhow::Result<()> {
+    // Initialize env_logger. Logs can be controlled by RUST_LOG environment variable.
+    // e.g., RUST_LOG=whisper_stream_rs=debug,whisper_rs=info
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // This is important to redirect whisper.cpp logs to the `log` facade
     whisper_rs::install_logging_hooks();
 
     println!("Available audio input devices:");

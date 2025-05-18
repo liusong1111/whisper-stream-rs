@@ -2,6 +2,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 use hound;
+use log::info;
 
 use crate::audio::{AudioInput};
 use crate::model::ensure_model;
@@ -136,7 +137,7 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
         }
 
         let wav_writer = if let Some(path_str) = config.record_to_wav.clone() {
-            println!("[Recording] Saving transcribed audio to {path_str}...");
+            info!("[Recording] Saving transcribed audio to {path_str}...");
             let spec = hound::WavSpec {
                 channels: audio_input.channels,
                 sample_rate: audio_input.sample_rate,

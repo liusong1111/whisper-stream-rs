@@ -19,6 +19,7 @@ use rubato::{FftFixedInOut, Resampler};
 use crate::error::WhisperStreamError; // Import custom error
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use log::{info, warn, error, debug};
 
 /// Encapsulates audio input device information and configuration for capture.
 ///
@@ -40,16 +41,14 @@ impl AudioInput {
         let devices = host.input_devices().map_err(WhisperStreamError::from)?; // Uses From<DevicesError>
         let mut device_names = Vec::new();
         for (index, device) in devices.enumerate() {
-            match device.name() {
-                Ok(name) => device_names.push(name),
+            let name = match device.name() {
+                Ok(n) => n,
                 Err(e) => {
-                    // Log this specific error but provide a generic name
-                    eprintln!("[Audio] Warning: Could not get name for input device #{}: {}", index, e);
-                    // Convert DeviceNameError to WhisperStreamError::AudioDevice for consistent error type if we were to return error here
-                    // For now, pushing a placeholder as original code did.
-                    device_names.push(format!("Device #{} (Name Error: {})", index, e));
+                    warn!("[Audio] Warning: Could not get name for input device #{}: {}", index, e);
+                    format!("<Unknown Device #{}>", index)
                 }
-            }
+            };
+            device_names.push(name);
         }
         Ok(device_names)
     }
@@ -79,10 +78,13 @@ impl AudioInput {
             }
         };
 
-        let actual_device_name = device.name().unwrap_or_else(|e| {
-            eprintln!("[Audio] Warning: Could not get device name: {}. Using <Unknown>.", e);
-            "<Unknown>".to_string()
-        });
+        let actual_device_name = match device.name() {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("[Audio] Warning: Could not get device name: {}. Using <Unknown>.", e);
+                "<Unknown>".to_string()
+            }
+        };
 
         let config = device
             .default_input_config()
@@ -92,11 +94,11 @@ impl AudioInput {
         let channels = config.channels();
         let buffer_size = (sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize * channels as usize;
 
-        println!("[Audio] Using input device: {}", actual_device_name);
-        println!("[Audio] Device input config: SampleRate({}), Channels({}), Format({})", sample_rate, channels, config.sample_format());
+        info!("[Audio] Using input device: {}", actual_device_name);
+        info!("[Audio] Device input config: SampleRate({}), Channels({}), Format({})", sample_rate, channels, config.sample_format());
 
         if channels != 1 {
-            eprintln!("[Audio][Warning] Source input device '{}' has {} channels. It will be downmixed to mono.", actual_device_name, channels);
+            warn!("[Audio][Warning] Source input device '{}' has {} channels. It will be downmixed to mono.", actual_device_name, channels);
         }
 
         Ok(Self {
@@ -185,14 +187,14 @@ impl AudioInput {
                     match final_chunk_result {
                         Ok(final_chunk) => {
                             if !final_chunk.is_empty() && tx.send(Ok(final_chunk)).is_err() {
-                                eprintln!("[Audio] Receiver dropped. Signalling to stop audio processing.");
+                                error!("[Audio] Receiver dropped. Signalling to stop audio processing.");
                                 callback_stop_signal.store(true, Ordering::Relaxed);
                                 return;
                             }
                         }
                         Err(e) => {
                              if tx.send(Err(e)).is_err() {
-                                eprintln!("[Audio] Receiver dropped while sending resample error. Signalling to stop.");
+                                error!("[Audio] Receiver dropped while sending resample error. Signalling to stop.");
                                 callback_stop_signal.store(true, Ordering::Relaxed);
                                 return;
                             }
@@ -201,7 +203,7 @@ impl AudioInput {
                 }
             },
             move |err: CpalStreamError| { // Use err_fn_outer_tx to send error
-                eprintln!("[Audio] Stream error: {}", err);
+                error!("[Audio] Stream error: {}", err);
                 let _ = err_fn_outer_tx.send(Err(WhisperStreamError::from(err)));
                 // Consider stopping processing here too via stop_processing_signal
             },
@@ -232,9 +234,13 @@ impl AudioInput {
         let step_duration_ms_clone = self.step_duration_ms;
 
         let stop_processing_signal = Arc::new(AtomicBool::new(false));
-        let thread_stop_signal = stop_processing_signal.clone();
+        let _thread_stop_signal = stop_processing_signal.clone(); // Renamed to avoid unused variable warning, assuming it might be used later or was for debugging
 
-        let tx_for_err_fn = tx.clone();
+        let tx_for_err_fn = tx.clone(); // For the stream error callback
+        let tx_for_data_cb = tx.clone(); // For the data callback
+
+        info!("[Audio] Starting capture for device '{}'. Native SR: {}, Target SR: {}, Channels: {}, Chunk ms: {}",
+            self.device_name, self.sample_rate, 16000, self.channels, self.step_duration_ms);
 
         std::thread::spawn(move || {
             let host = cpal::default_host();
@@ -278,7 +284,7 @@ impl AudioInput {
                     Ok(r) => Some(r),
                     Err(e) => {
                         let err_msg = format!("Failed to create audio resampler: {}", e);
-                        eprintln!("[Audio] Error: {}", err_msg);
+                        error!("[Audio] Error: {}", err_msg);
                         let _ = tx.send(Err(WhisperStreamError::AudioResampling(err_msg)));
                         return;
                     }
@@ -287,64 +293,70 @@ impl AudioInput {
                 None
             };
 
-            println!("[Audio] Starting capture. Native SR: {}, Target SR: {}, Channels: {}, Chunk Samples: {}", native_sample_rate, target_sample_rate, audio_channels, device_samples_per_step);
+            info!("[Audio] Starting capture. Native SR: {}, Target SR: {}, Channels: {}, Chunk Samples: {}", native_sample_rate, target_sample_rate, audio_channels, device_samples_per_step);
 
             let stream_result = match config.sample_format() {
-                SampleFormat::F32 => Self::process_audio_stream_internal::<f32, _>(
-                    &device, &config.into(), tx.clone(), audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn.clone(), |s| *s, thread_stop_signal.clone()),
-                SampleFormat::I16 => Self::process_audio_stream_internal::<i16, _>(
-                    &device, &config.into(), tx.clone(), audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn.clone(), |s| s.to_float_sample(), thread_stop_signal.clone()),
-                SampleFormat::U16 => Self::process_audio_stream_internal::<u16, _>(
-                    &device, &config.into(), tx.clone(), audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn.clone(), |s| s.to_float_sample(), thread_stop_signal.clone()),
+                SampleFormat::F32 => {
+                    let convert_sample = |s: &f32| *s;
+                    Self::process_audio_stream_internal::<f32, _>(
+                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, convert_sample, stop_processing_signal.clone())
+                }
+                SampleFormat::I16 => {
+                    let convert_sample = |s: &i16| s.to_float_sample();
+                    Self::process_audio_stream_internal::<i16, _>(
+                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, convert_sample, stop_processing_signal.clone())
+                }
+                SampleFormat::U16 => {
+                    let convert_sample = |s: &u16| s.to_float_sample();
+                    Self::process_audio_stream_internal::<u16, _>(
+                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, convert_sample, stop_processing_signal.clone())
+                }
                 // Handling other formats might require specific conversions or error reporting.
                 other_format => {
                     let err_msg = format!("Unsupported sample format: {:?}", other_format);
-                    eprintln!("[Audio] {}", err_msg);
+                    error!("[Audio] {}", err_msg);
                     let _ = tx.send(Err(WhisperStreamError::AudioStreamConfig(err_msg)));
                     return;
                 }
             };
 
-            let stream = match stream_result {
-                Ok(s) => s,
+            match stream_result {
+                Ok(stream) => {
+                    if stream.play().is_err() {
+                        error!("[Audio] Failed to play stream: {}", device_name_clone); // Simplified error message
+                        let _ = tx.send(Err(WhisperStreamError::AudioDevice("Failed to play stream".to_string())));
+                        return;
+                    }
+                    // The stream is now playing. We need to keep this thread alive to process stop signals.
+                    // The actual audio processing happens in cpal's callback threads.
+                    loop {
+                        if stop_processing_signal.load(Ordering::Relaxed) {
+                            debug!("[Audio] Stop signal received in main capture thread for device '{}'. Stream will be dropped.", device_name_clone);
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100)); // Check for stop signal
+                    }
+                    // Dropping the stream here will stop the cpal callbacks
+                }
                 Err(e) => {
-                    eprintln!("[Audio] Failed to build input stream: {}", e);
-                    let _ = tx.send(Err(e)); // Send error through channel
+                    error!("[Audio] Failed to build input stream for device '{}': {}", device_name_clone, e);
+                    let _ = tx.send(Err(e)); // Send the specific error
                     return;
                 }
-            };
-
-            if let Err(e) = stream.play() {
-                eprintln!("[Audio] Failed to play stream: {}", e);
-                // Cpal PlayStreamError is not easily convertible with From to WhisperStreamError
-                // It's an enum, so we'd have to match it or format it.
-                let _ = tx.send(Err(WhisperStreamError::AudioStreamRuntime(format!("Failed to play stream: {}", e))));
-                return;
             }
-
-            // Keep thread alive while stream is running or until stop signal
-            // The stream itself runs on a separate thread managed by cpal.
-            // This thread needs to stay alive so `stream` isn't dropped.
-            // A more robust way might be to use a channel to signal when processing should stop.
-            while !stop_processing_signal.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                 // Check if the receiver has been dropped (e.g. main thread exited)
-                if tx.send(Ok(Vec::new())).is_err() { // Send a dummy Ok to check
-                    if !stop_processing_signal.load(Ordering::Relaxed) { // Avoid double signal
-                        eprintln!("[Audio] Main receiver dropped. Stopping audio capture thread.");
-                        stop_processing_signal.store(true, Ordering::Relaxed);
-                    }
-                    break;
-                } else {
-                    // Remove the dummy Vec from the channel if successfully sent
-                    // This is a bit hacky. A dedicated control channel would be cleaner.
-                    // For now, the receiver side in stream.rs will filter out empty Vecs.
-                }
-            }
-
-            // stream.pause().ok(); // Attempt to pause, ignore error if it occurs during shutdown.
-            println!("[Audio] Audio capture thread finished.");
+             info!("[Audio] Audio capture thread for '{}' finished.", device_name_clone);
         });
+
         rx
+    }
+
+    /// Signals the audio capture thread to stop processing and clean up.
+    ///
+    /// This sets an atomic flag that the capture thread periodically checks.
+    /// Once the flag is set, the capture thread will stop processing new audio data,
+    /// allow the cpal stream to be dropped (which stops hardware capture), and then exit.
+    pub fn stop_capture(stop_signal: Arc<AtomicBool>) {
+        debug!("[Audio] Setting stop signal for audio capture.");
+        stop_signal.store(true, Ordering::Relaxed);
     }
 }
