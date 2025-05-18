@@ -65,8 +65,12 @@ fn ensure_coreml_model_if_enabled(cache_dir: &Path) -> Result<(), WhisperStreamE
         info!("Unzipping CoreML model to {}...", cache_dir.display());
         if let Err(e) = unzip_file(&coreml_zip_path, &cache_dir) {
             // Attempt to clean up the potentially corrupted zip file or partial extraction
-            let _ = fs::remove_file(&coreml_zip_path);
-            let _ = fs::remove_dir_all(&coreml_model_dir_path); // remove potentially partially extracted dir
+            if let Err(remove_err) = fs::remove_file(&coreml_zip_path) {
+                warn!("Failed to remove zip file {} during cleanup: {}", coreml_zip_path.display(), remove_err);
+            }
+            if let Err(remove_dir_err) = fs::remove_dir_all(&coreml_model_dir_path) {
+                warn!("Failed to remove directory {} during cleanup: {}", coreml_model_dir_path.display(), remove_dir_err);
+            }
             // The error is returned from this function, so no need for error! here, caller handles it.
             return Err(e);
         }

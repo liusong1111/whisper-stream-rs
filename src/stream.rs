@@ -1,7 +1,8 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
-use log::info;
+use log::{info, error};
+use std::sync::Arc;
 
 use crate::audio::{AudioInput};
 use crate::model::ensure_model;
@@ -141,13 +142,27 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
             params_full.set_language(Some(lang));
         }
 
+        // Wrap FullParams in Arc for efficient sharing
+        let arc_params_full = Arc::new(params_full);
+
         let mut wav_audio_recorder = match WavAudioRecorder::new(config.record_to_wav.as_deref()) {
             Ok(recorder) => recorder,
             Err(e) => {
-                send_custom_error(&tx, e);
-                // Decide if you want to return or continue without recording
-                // For now, let's assume we continue without recording if init fails
-                WavAudioRecorder::new(None).unwrap() // Creates a no-op recorder
+                send_custom_error(&tx, e); // Report the error
+                // Fallback to a no-op recorder if initialization failed for the specified path.
+                // This path (new(None)) should ideally not fail, but we handle it robustly.
+                match WavAudioRecorder::new(None) {
+                    Ok(no_op_recorder) => no_op_recorder,
+                    Err(fallback_err) => {
+                        // This is highly unlikely if WavAudioRecorder::new(None) is implemented correctly.
+                        // If it does happen, log it and we'll have no recording capability at all.
+                        error!("Failed to create even a fallback no-op WavAudioRecorder: {}", fallback_err);
+                        // Create a dummy recorder that is explicitly not recording to satisfy type requirements.
+                        // This assumes WavAudioRecorder has a way to be instantiated as non-recording directly or via new(None).
+                        // The current new(None) already does this.
+                        WavAudioRecorder::new(None).expect("Fallback no-op recorder creation (None) should not fail")
+                    }
+                }
             }
         };
 
@@ -155,8 +170,8 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
             if let Some(path_str) = config.record_to_wav.as_ref() {
                 info!("[Recording] Saving transcribed audio to {}...", path_str);
                 if tx.send(TranscriptionStreamEvent::SystemMessage(format!("[Recording] Saving transcribed audio to {}...", path_str))).is_err() {
-                    // If sending system message fails, maybe stop processing or just log
-                    return; // Example: stop if we can't send critical system messages
+                    error!("Failed to send system message about recording start. Continuing without aborting.");
+                    // No longer returning here, just log the error.
                 }
             }
         }
@@ -175,16 +190,19 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 }
             };
 
-            // Write to WAV file if recording is active
-            if let Err(e) = wav_audio_recorder.write_audio_chunk(&pcmf32_new) {
-                send_custom_error(&tx, e); // Report error but continue processing audio for transcription
+            // Write to WAV file only if recording is active
+            if wav_audio_recorder.is_recording() {
+                if let Err(e) = wav_audio_recorder.write_audio_chunk(&pcmf32_new) {
+                    send_custom_error(&tx, e); // Report error but continue processing
+                }
             }
 
             segment_window.extend_from_slice(&pcmf32_new);
 
             let audio_for_processing = pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
 
-            if let Err(e) = state.full(params_full.clone(), &audio_for_processing) {
+            // Clone the Arc (cheap) instead of cloning FullParams itself
+            if let Err(e) = state.full(arc_params_full.as_ref().clone(), &audio_for_processing) {
                 send_custom_error(&tx, WhisperStreamError::from(e));
                 continue;
             }
@@ -224,7 +242,8 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
         if !segment_window.is_empty() {
             let final_audio_for_processing = pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
 
-            if let Err(e) = state.full(params_full.clone(), &final_audio_for_processing) {
+            // Clone the Arc (cheap) for the final processing call
+            if let Err(e) = state.full(arc_params_full.as_ref().clone(), &final_audio_for_processing) {
                 send_custom_error(&tx, WhisperStreamError::from(e));
             } else {
                 let mut final_text = String::new();
