@@ -3,6 +3,7 @@ use hound::{WavWriter, WavSpec, SampleFormat};
 use crate::error::WhisperStreamError;
 use std::fs;
 use std::path::Path;
+use log::warn;
 
 /// Pads an audio segment with silence if it's shorter than `min_samples`.
 ///
@@ -76,7 +77,14 @@ impl WavAudioRecorder {
     ///                  Samples should be in the range -1.0 to 1.0.
     pub fn write_audio_chunk(&mut self, audio_chunk: &[f32]) -> Result<(), WhisperStreamError> {
         if let Some(writer) = self.writer.as_mut() {
-            for &sample_f32 in audio_chunk {
+            for &sample_f32_original in audio_chunk {
+                let sample_f32 = if sample_f32_original.is_finite() {
+                    sample_f32_original
+                } else {
+                    warn!("Non-finite audio sample detected: {}. Replacing with 0.0.", sample_f32_original);
+                    0.0
+                };
+
                 // Clamp to [-1.0, 1.0) then scale and cast
                 // The range of f32 is [-1.0, 1.0]. `1.0 - f32::EPSILON` is effectively the largest value less than 1.0.
                 let clamped_sample = sample_f32.clamp(-1.0, 1.0 - std::f32::EPSILON);

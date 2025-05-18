@@ -18,6 +18,7 @@ const DEFAULT_KEEP_MS: u32 = 200;
 const DEFAULT_MAX_TOKENS: i32 = 32;
 const DEFAULT_N_THREADS: i32 = 4; // Fallback, actual default uses available_parallelism
 const DEFAULT_AUDIO_DEVICE_NAME: Option<String> = None;
+const DEFAULT_COMPUTE_PARTIALS: bool = true;
 
 /// Configuration for the transcription stream.
 #[derive(Debug, Clone)]
@@ -38,6 +39,9 @@ pub struct TranscriptionStreamParams {
     pub n_threads: i32,
     /// Optional human-readable device name passed to `AudioInput::new`; `None` means default system device.
     pub audio_device_name: Option<String>,
+    /// Whether to compute and send partial (intermediate) transcripts.
+    /// If false, only transcripts for a full `length_ms` window are sent.
+    pub compute_partials: bool,
 }
 
 impl Default for TranscriptionStreamParams {
@@ -57,17 +61,29 @@ impl Default for TranscriptionStreamParams {
             max_tokens: DEFAULT_MAX_TOKENS,
             n_threads: default_n_threads,
             audio_device_name: DEFAULT_AUDIO_DEVICE_NAME, // This is None, which is const
+            compute_partials: DEFAULT_COMPUTE_PARTIALS,
         }
     }
 }
 
-/// Configuration for the transcription stream.
+/// Events emitted by the transcription stream.
+///
+/// Includes transcribed text segments, system messages (like recording status),
+/// and errors encountered during processing.
 #[derive(Debug)]
 pub enum TranscriptionStreamEvent {
-    Transcript {
-        text: String,
-        is_final: bool,
-    },
+    /// A provisional, live text update. This is an intermediate result, suitable for displaying
+    /// real-time feedback. It is subject to change and will be superseded by subsequent
+    /// `ProvisionalLiveUpdate` messages (providing more refined guesses for the same ongoing audio)
+    /// or ultimately by a `SegmentTranscript` for that audio segment.
+    /// These should not be stored or considered definitive.
+    ProvisionalLiveUpdate { text: String, score: i32 },
+
+    /// The final and complete transcription for a specific audio segment window
+    /// (defined by `length_ms` in `TranscriptionStreamParams`). This is the version of the
+    /// transcript that should be considered the actual output for that portion of audio.
+    SegmentTranscript { text: String, score: i32 },
+
     SystemMessage(String),
     Error(WhisperStreamError),
 }
@@ -215,23 +231,31 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                             Ok(seg) => current_text.push_str(&seg),
                             Err(e) => {
                                 send_custom_error(&tx, WhisperStreamError::from(e));
-                                break;
+                                break; // Break from segment loop on error
                             }
                         }
                     }
                 }
                 Err(e) => {
                     send_custom_error(&tx, WhisperStreamError::from(e));
-                    continue;
+                    continue; // Continue to next audio chunk
                 }
             }
+
             if !current_text.trim().is_empty() {
-                let _ = tx.send(TranscriptionStreamEvent::Transcript { text: current_text.clone(), is_final: false });
-            }
-            if segment_window.len() >= n_samples_window {
-                if !current_text.trim().is_empty() {
-                    let _ = tx.send(TranscriptionStreamEvent::Transcript { text: current_text, is_final: true });
+                let score = crate::score::calculate_score(&current_text);
+                if segment_window.len() >= n_samples_window {
+                    // This iteration processed enough audio for a full segment based on length_ms.
+                    let _ = tx.send(TranscriptionStreamEvent::SegmentTranscript { text: current_text.clone(), score });
+                } else if config.compute_partials {
+                    // This iteration is on an intermediate part of a segment, and partials are enabled.
+                    let _ = tx.send(TranscriptionStreamEvent::ProvisionalLiveUpdate { text: current_text.clone(), score });
                 }
+            }
+
+            if segment_window.len() >= n_samples_window {
+                // current_text for this full window was already sent above with partial: false.
+                // Now, manage the segment_window for overlap or clearing.
                 if n_samples_overlap > 0 && segment_window.len() > n_samples_overlap {
                     segment_window = segment_window[segment_window.len() - n_samples_overlap..].to_vec();
                 } else {
@@ -264,7 +288,9 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                     }
                 }
                 if !final_text.trim().is_empty() {
-                    let _ = tx.send(TranscriptionStreamEvent::Transcript { text: final_text, is_final: true });
+                    // Final transcript for any remaining audio is always a SegmentTranscript.
+                    let score = crate::score::calculate_score(&final_text);
+                    let _ = tx.send(TranscriptionStreamEvent::SegmentTranscript { text: final_text, score });
                 }
             }
         }
