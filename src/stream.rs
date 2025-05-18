@@ -3,7 +3,7 @@ use std::thread;
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 use hound;
 
-use crate::audio::start_audio_capture;
+use crate::audio::{AudioInput};
 use crate::model::ensure_model;
 
 /// Configuration for the transcription stream.
@@ -71,7 +71,8 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             }
         };
         // 3. Start audio capture
-        let audio_rx = start_audio_capture(config.step_ms);
+        let audio_input = AudioInput::new(config.step_ms, 1.0); // gain=1.0 for now, could be configurable
+        let audio_rx = audio_input.start_capture_16k(config.step_ms);
         let sample_rate = 16000;
         let n_samples_len = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
         let n_samples_keep = (sample_rate as f32 * (config.keep_ms as f32 / 1000.0)) as usize;
@@ -84,12 +85,12 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             }
         };
         let mut last_text = None;
-        // WAV writer setup
+        // WAV writer setup (record original device audio, not resampled)
         let mut wav_writer = if let Some(path) = config.record_to_wav.clone() {
             println!("[Recording] Saving transcribed audio to {path}...");
             let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: sample_rate,
+                channels: audio_input.channels,
+                sample_rate: audio_input.sample_rate,
                 bits_per_sample: 16,
                 sample_format: hound::SampleFormat::Int,
             };
@@ -98,7 +99,7 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             None
         };
         for pcmf32_new in audio_rx {
-            // Write to WAV if enabled
+            // Write to WAV if enabled (convert f32 to i16 for WAV)
             if let Some(writer) = wav_writer.as_mut() {
                 for &sample in &pcmf32_new {
                     let s = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
