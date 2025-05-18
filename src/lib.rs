@@ -4,4 +4,4 @@ mod model;
 mod audio;
 mod stream;
 
-pub use stream::start_transcription_stream;
+pub use stream::{start_transcription_stream, TranscriptionStreamEvent};

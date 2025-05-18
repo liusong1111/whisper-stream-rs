@@ -11,15 +11,25 @@ const LENGTH_MS: u32 = 10000;
 const KEEP_MS: u32 = 200;
 const MAX_TOKENS: i32 = 32;
 
-/// Starts the transcription stream and returns a receiver for transcribed text.
-pub fn start_transcription_stream() -> Receiver<String> {
+#[derive(Debug, Clone)]
+pub enum TranscriptionStreamEvent {
+    Transcript {
+        text: String,
+        is_final: bool,
+    },
+    SystemMessage(String),
+    Error(String),
+}
+
+/// Starts the transcription stream and returns a receiver for stream events.
+pub fn start_transcription_stream() -> Receiver<TranscriptionStreamEvent> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         // 1. Ensure model is present
         let model_path = match ensure_model() {
             Ok(p) => p,
             Err(e) => {
-                let _ = tx.send(format!("Model error: {e}"));
+                let _ = tx.send(TranscriptionStreamEvent::Error(format!("Model error: {e}")));
                 return;
             }
         };
@@ -30,7 +40,7 @@ pub fn start_transcription_stream() -> Receiver<String> {
         ) {
             Ok(c) => c,
             Err(e) => {
-                let _ = tx.send(format!("Failed to load model: {e}"));
+                let _ = tx.send(TranscriptionStreamEvent::Error(format!("Failed to load model: {e}")));
                 return;
             }
         };
@@ -44,10 +54,11 @@ pub fn start_transcription_stream() -> Receiver<String> {
         let mut state = match ctx.create_state() {
             Ok(s) => s,
             Err(e) => {
-                let _ = tx.send(format!("Failed to create state: {e}"));
+                let _ = tx.send(TranscriptionStreamEvent::Error(format!("Failed to create state: {e}")));
                 return;
             }
         };
+        let mut last_text = None;
         for pcmf32_new in audio_rx {
             // Take up to n_samples_len audio from previous iteration
             let n_samples_take = std::cmp::min(pcmf32_old.len(), n_samples_keep + n_samples_len - pcmf32_new.len());
@@ -70,37 +81,48 @@ pub fn start_transcription_stream() -> Receiver<String> {
             params.set_print_timestamps(false);
             params.set_language(Some("en"));
             let res = state.full(params, &pcmf32);
+            let mut text = String::new();
             match res {
                 Ok(_) => {
                     let num_segments = match state.full_n_segments() {
                         Ok(n) => n,
                         Err(e) => {
-                            let _ = tx.send(format!("Segment error: {e}"));
+                            let _ = tx.send(TranscriptionStreamEvent::Error(format!("Segment error: {e}")));
                             continue;
                         }
                     };
-                    let mut text = String::new();
                     for i in 0..num_segments {
                         match state.full_get_segment_text(i) {
                             Ok(seg) => text.push_str(&seg),
                             Err(e) => {
-                                let _ = tx.send(format!("Segment text error: {e}"));
+                                let _ = tx.send(TranscriptionStreamEvent::Error(format!("Segment text error: {e}")));
                                 continue;
                             }
                         }
                     }
-                    let _ = tx.send(text);
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Transcription error: {e}"));
+                    let _ = tx.send(TranscriptionStreamEvent::Error(format!("Transcription error: {e}")));
+                    continue;
                 }
             }
+            // Send the previous chunk as final, if any
+            if let Some(prev) = last_text.take() {
+                let _ = tx.send(TranscriptionStreamEvent::Transcript { text: prev, is_final: true });
+            }
+            // Send the current chunk as intermediate
+            let _ = tx.send(TranscriptionStreamEvent::Transcript { text: text.clone(), is_final: false });
+            last_text = Some(text);
             // Keep part of the audio for next iteration
             if pcmf32.len() > n_samples_keep {
                 pcmf32_old = pcmf32[pcmf32.len() - n_samples_keep..].to_vec();
             } else {
                 pcmf32_old = pcmf32;
             }
+        }
+        // After the loop, send the last chunk as final if any
+        if let Some(prev) = last_text.take() {
+            let _ = tx.send(TranscriptionStreamEvent::Transcript { text: prev, is_final: true });
         }
     });
     rx
