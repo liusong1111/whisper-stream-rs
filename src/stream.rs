@@ -71,7 +71,7 @@ pub fn start_transcription_stream(config: TranscriptionConfig) -> Receiver<Trans
             }
         };
         // 3. Start audio capture
-        let audio_input = AudioInput::new(config.step_ms, 1.0); // gain=1.0 for now, could be configurable
+        let audio_input = AudioInput::new(config.step_ms);
         let audio_rx = audio_input.start_capture_16k(config.step_ms);
         let sample_rate = 16000;
         let n_samples_len = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;

@@ -9,12 +9,11 @@ pub struct AudioInput {
     pub sample_rate: u32,
     pub channels: u16,
     pub buffer_size: usize,
-    pub gain: f32,
 }
 
 impl AudioInput {
     /// Create a new AudioInput from the default input device
-    pub fn new(step_ms: u32, gain: f32) -> Self {
+    pub fn new(step_ms: u32) -> Self {
         let host = cpal::default_host();
         let device = host.default_input_device().expect("No input device available");
         let device_name = device.name().unwrap_or("<Unknown>".to_string());
@@ -32,11 +31,10 @@ impl AudioInput {
             sample_rate,
             channels,
             buffer_size,
-            gain,
         }
     }
 
-    /// Start audio capture, resample to 16kHz mono, and apply gain. Returns a receiver of 16kHz mono f32 buffers.
+    /// Start audio capture, resample to 16kHz mono. Returns a receiver of 16kHz mono f32 buffers.
     pub fn start_capture_16k(&self, step_ms: u32) -> Receiver<Vec<f32>> {
         let (tx, rx) = mpsc::channel();
         let host = cpal::default_host();
@@ -44,19 +42,18 @@ impl AudioInput {
         let config = device.default_input_config().expect("No default input config");
         let sample_format = config.sample_format();
         let config: StreamConfig = config.into();
-        let buffer_size = (self.sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize;
-        let gain = self.gain;
+        let device_sample_rate = self.sample_rate;
         let channels = self.channels as usize;
-        let need_resample = self.sample_rate != 16000;
-        let sample_rate = self.sample_rate;
+        let device_samples_per_step = (device_sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize;
+        let need_resample = device_sample_rate != 16000;
         std::thread::spawn(move || {
             let err_fn = |err| eprintln!("Stream error: {err}");
-            let mut buffer = Vec::with_capacity(buffer_size * channels);
-            let resampler = if need_resample {
+            let mut buffer = Vec::with_capacity(device_samples_per_step * channels);
+            let mut resampler = if need_resample {
                 Some(FftFixedInOut::<f32>::new(
-                    sample_rate as usize,
+                    device_sample_rate as usize,
                     16000,
-                    buffer_size,
+                    device_samples_per_step,
                     1,
                 ).expect("Failed to create resampler"))
             } else {
@@ -66,15 +63,13 @@ impl AudioInput {
                 SampleFormat::F32 => {
                     let tx = tx.clone();
                     let channels = channels;
-                    let gain = gain;
-                    let buffer_size = buffer_size;
                     let mut resampler = resampler;
                     device.build_input_stream(
                         &config,
                         move |data: &[f32], _| {
                             buffer.extend_from_slice(data);
-                            while buffer.len() >= buffer_size * channels {
-                                let mut chunk: Vec<f32> = buffer.drain(..buffer_size * channels).collect();
+                            while buffer.len() >= device_samples_per_step * channels {
+                                let mut chunk: Vec<f32> = buffer.drain(..device_samples_per_step * channels).collect();
                                 // Downmix to mono if needed
                                 if channels > 1 {
                                     chunk = chunk
@@ -90,8 +85,6 @@ impl AudioInput {
                                 } else {
                                     chunk
                                 };
-                                // Apply gain
-                                let chunk: Vec<f32> = chunk.into_iter().map(|s| s * gain).collect();
                                 let _ = tx.send(chunk);
                             }
                         },
@@ -102,15 +95,13 @@ impl AudioInput {
                 SampleFormat::I16 => {
                     let tx = tx.clone();
                     let channels = channels;
-                    let gain = gain;
-                    let buffer_size = buffer_size;
                     let mut resampler = resampler;
                     device.build_input_stream(
                         &config,
                         move |data: &[i16], _| {
                             buffer.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
-                            while buffer.len() >= buffer_size * channels {
-                                let mut chunk: Vec<f32> = buffer.drain(..buffer_size * channels).collect();
+                            while buffer.len() >= device_samples_per_step * channels {
+                                let mut chunk: Vec<f32> = buffer.drain(..device_samples_per_step * channels).collect();
                                 if channels > 1 {
                                     chunk = chunk
                                         .chunks(channels)
@@ -124,7 +115,6 @@ impl AudioInput {
                                 } else {
                                     chunk
                                 };
-                                let chunk: Vec<f32> = chunk.into_iter().map(|s| s * gain).collect();
                                 let _ = tx.send(chunk);
                             }
                         },
@@ -135,15 +125,13 @@ impl AudioInput {
                 SampleFormat::U16 => {
                     let tx = tx.clone();
                     let channels = channels;
-                    let gain = gain;
-                    let buffer_size = buffer_size;
                     let mut resampler = resampler;
                     device.build_input_stream(
                         &config,
                         move |data: &[u16], _| {
                             buffer.extend(data.iter().map(|&s| s as f32 / u16::MAX as f32 - 0.5));
-                            while buffer.len() >= buffer_size * channels {
-                                let mut chunk: Vec<f32> = buffer.drain(..buffer_size * channels).collect();
+                            while buffer.len() >= device_samples_per_step * channels {
+                                let mut chunk: Vec<f32> = buffer.drain(..device_samples_per_step * channels).collect();
                                 if channels > 1 {
                                     chunk = chunk
                                         .chunks(channels)
@@ -157,7 +145,6 @@ impl AudioInput {
                                 } else {
                                     chunk
                                 };
-                                let chunk: Vec<f32> = chunk.into_iter().map(|s| s * gain).collect();
                                 let _ = tx.send(chunk);
                             }
                         },
