@@ -1,6 +1,6 @@
 use whisper_stream_rs::stream::{TranscriptionStreamParams, TranscriptionStreamEvent};
 use whisper_stream_rs::audio::AudioInput; // For AudioInput::available_input_devices
-use whisper_stream_rs::start_transcription_stream;
+use whisper_stream_rs::{start_transcription_stream, install_logging_hooks};
 use std::io::{stdout, Write}; // Added for stdout().flush()
 use env_logger;
 use clap::Parser;
@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // This is important to redirect whisper.cpp logs to the `log` facade
-    whisper_rs::install_logging_hooks();
+    install_logging_hooks();
 
     let args = CliArgs::parse();
 
