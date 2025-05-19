@@ -10,7 +10,7 @@
 /// # Returns
 /// The score: `10`, `5`, or `0`.
 pub fn calculate_score(text: &str) -> i32 {
-    let high_priority_patterns = [
+    let silence_indicators = [
         "[ Silence ]",
         "[silence]",
         "[BLANK",
@@ -28,7 +28,7 @@ pub fn calculate_score(text: &str) -> i32 {
     let text_start_lower = text.trim_start().to_lowercase();
 
     // Check for high-priority patterns
-    if high_priority_patterns
+    if silence_indicators
         .iter()
         .any(|p| text_start_lower.starts_with(&p.to_lowercase()))
     {

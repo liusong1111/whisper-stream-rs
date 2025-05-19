@@ -198,12 +198,24 @@ impl AudioInput {
                     return;
                 }
 
-                let converted: Vec<f32> = data.iter().map(&convert_sample).collect();
-                let min = converted.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-                let max = converted.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-                debug!("[Audio] Input chunk: len={}, range=[{:.3}, {:.3}]", data.len(), min, max);
-
-                main_buffer.extend(converted);
+                if log::log_enabled!(log::Level::Debug) {
+                    let mut min = f32::INFINITY;
+                    let mut max = f32::NEG_INFINITY;
+                    for sample in data {
+                        let s = convert_sample(sample);
+                        min = min.min(s);
+                        max = max.max(s);
+                        main_buffer.push(s);
+                    }
+                    debug!(
+                        "[Audio] Input chunk: len={}, range=[{:.3}, {:.3}]",
+                        data.len(),
+                        min,
+                        max
+                    );
+                } else {
+                    main_buffer.extend(data.iter().map(&convert_sample));
+                }
 
                 while main_buffer.len() >= device_samples_per_step * audio_channels {
                     if callback_stop_signal.load(Ordering::Relaxed) {

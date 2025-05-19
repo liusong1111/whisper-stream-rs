@@ -19,7 +19,7 @@ pub fn pad_audio_if_needed(audio_segment: &[f32], min_samples: usize) -> Cow<'_,
         let mut padded_segment = Vec::with_capacity(min_samples);
         padded_segment.extend_from_slice(audio_segment);
         let padding_needed = min_samples - audio_segment.len();
-        padded_segment.extend(std::iter::repeat_n(0.0f32, padding_needed));
+        padded_segment.extend(std::iter::repeat(0.0f32).take(padding_needed));
         Cow::Owned(padded_segment)
     } else {
         Cow::Borrowed(audio_segment)
