@@ -54,24 +54,62 @@ impl AudioInput {
     /// Fetches device config and warns if not mono, as mono is the target format.
     pub fn new(device_name_opt: Option<&str>, step_ms: u32) -> Result<Self, WhisperStreamError> {
         let host = cpal::default_host();
-        let device = match device_name_opt {
+
+        // Always list devices first to potentially trigger permission prompt
+        info!("[Audio] Available input devices:");
+        let mut found_devices = Vec::new();
+
+        // Get the default device name first for comparison
+        let default_name = host.default_input_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_else(|| "<unknown default>".to_string());
+        info!("[Audio] Default input device is: {}", default_name);
+
+        for device in host.input_devices().map_err(WhisperStreamError::from)? {
+            if let Ok(name) = device.name() {
+                info!("[Audio] Found device: {} {}",
+                    name,
+                    if name == default_name { "(default)" } else { "" }
+                );
+                found_devices.push((name, device));
+            }
+        }
+
+        if found_devices.is_empty() {
+            return Err(WhisperStreamError::AudioDevice("No input devices available".to_string()));
+        }
+
+        let (device_name, device) = match device_name_opt {
             Some(name) => {
-                let devices = host.input_devices().map_err(WhisperStreamError::from)?;
-                devices.into_iter()
-                    .find(|d| d.name().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+                // Try to find the exact device
+                found_devices.into_iter()
+                    .find(|(dev_name, _)| dev_name.eq_ignore_ascii_case(name))
                     .ok_or_else(|| WhisperStreamError::AudioDevice(format!("Input device named '{}' not found (case-insensitive search)", name)))?
             }
             None => {
-                host.default_input_device()
-                    .ok_or_else(|| WhisperStreamError::AudioDevice("No default input device available".to_string()))?
-            }
-        };
+                // Try to find a non-default device first (prefer external microphones)
+                info!("[Audio] No device specified, looking for best available device...");
 
-        let actual_device_name = match device.name() {
-            Ok(n) => n,
-            Err(e) => {
-                warn!("[Audio] Warning: Could not get device name: {}. Using <Unknown>.", e);
-                "<Unknown>".to_string()
+                // Find index of preferred device
+                let preferred_idx = found_devices.iter()
+                    .position(|(name, _)| {
+                        name != &default_name && (
+                            name.contains("EarPods") ||
+                            name.contains("MacBook Pro-Mikrofon") ||
+                            !name.contains("Default")
+                        )
+                    });
+
+                // Remove and return either the preferred device or the first one
+                if let Some(idx) = preferred_idx {
+                    let (name, device) = found_devices.remove(idx);
+                    info!("[Audio] Selected preferred device: {}", name);
+                    (name, device)
+                } else {
+                    let (name, device) = found_devices.remove(0);
+                    info!("[Audio] No preferred device found, using: {}", name);
+                    (name, device)
+                }
             }
         };
 
@@ -79,19 +117,42 @@ impl AudioInput {
             .default_input_config()
             .map_err(WhisperStreamError::from)?;
 
+        // Try to get supported configs for this device specifically
+        info!("[Audio] Checking supported configurations for device: {}", device_name);
+        if let Ok(supported_configs) = device.supported_input_configs() {
+            for supported_config in supported_configs {
+                info!("[Audio] - Supported: Rate {:?}, Channels {}, Format {:?}",
+                    supported_config.min_sample_rate()..=supported_config.max_sample_rate(),
+                    supported_config.channels(),
+                    supported_config.sample_format()
+                );
+            }
+        }
+
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
         let buffer_size = (sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize * channels as usize;
 
-        info!("[Audio] Using input device: {}", actual_device_name);
-        info!("[Audio] Device input config: SampleRate({}), Channels({}), Format({})", sample_rate, channels, config.sample_format());
+        info!("[Audio] Attempting to use device: {}", device_name);
+        info!("[Audio] Selected config: SampleRate({}), Channels({}), Format({})",
+            sample_rate, channels, config.sample_format());
+
+        // Try to verify device access
+        info!("[Audio] Verifying device access...");
+        if let Err(e) = device.default_input_config() {
+            error!("[Audio] Failed to access device configuration: {}", e);
+            return Err(WhisperStreamError::AudioDevice(
+                format!("Failed to access device '{}'. Please check microphone permissions: {}", device_name, e)
+            ));
+        }
+        info!("[Audio] Successfully verified device access");
 
         if channels != 1 {
-            warn!("[Audio][Warning] Source input device '{}' has {} channels. It will be downmixed to mono.", actual_device_name, channels);
+            warn!("[Audio][Warning] Source input device '{}' has {} channels. It will be downmixed to mono.", device_name, channels);
         }
 
         Ok(Self {
-            device_name: actual_device_name,
+            device_name,
             sample_rate,
             channels,
             buffer_size,
@@ -137,7 +198,12 @@ impl AudioInput {
                     return;
                 }
 
-                main_buffer.extend(data.iter().map(&convert_sample));
+                let converted: Vec<f32> = data.iter().map(&convert_sample).collect();
+                let min = converted.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+                let max = converted.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                debug!("[Audio] Input chunk: len={}, range=[{:.3}, {:.3}]", data.len(), min, max);
+
+                main_buffer.extend(converted);
 
                 while main_buffer.len() >= device_samples_per_step * audio_channels {
                     if callback_stop_signal.load(Ordering::Relaxed) {
@@ -245,6 +311,19 @@ impl AudioInput {
         let device_name_clone = self.device_name.clone();
         let step_duration_ms_clone = self.step_duration_ms;
 
+        #[cfg(target_os = "macos")]
+        {
+            // Double-check permissions before starting capture
+            let host = cpal::default_host();
+            if let Err(e) = host.input_devices() {
+                error!("[Audio] No microphone access. Please check System Settings > Privacy & Security > Microphone");
+                let _ = tx.send(Err(WhisperStreamError::AudioDevice(
+                    "No microphone access. Please check System Settings > Privacy & Security > Microphone".to_string()
+                )));
+                return rx;
+            }
+        }
+
         let stop_processing_signal = Arc::new(AtomicBool::new(false));
         // _thread_stop_signal kept for potential future use or if stream lifetime needs explicit management with it.
         let _thread_stop_signal = stop_processing_signal.clone();
@@ -275,7 +354,7 @@ impl AudioInput {
                 }
             };
 
-            let config = match device.default_input_config().map_err(WhisperStreamError::from) {
+                        let default_config = match device.default_input_config().map_err(WhisperStreamError::from) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = tx.send(Err(e));
@@ -283,11 +362,34 @@ impl AudioInput {
                 }
             };
 
-            let native_sample_rate = config.sample_rate().0;
-            let audio_channels = config.channels() as usize;
+            let native_sample_rate = default_config.sample_rate().0;
+
+            // Create a specific config instead of using default
+            let config = StreamConfig {
+                channels: 1, // Force mono
+                sample_rate: cpal::SampleRate(native_sample_rate),
+                buffer_size: cpal::BufferSize::Default,
+            };
+            debug!("[Audio] Using explicit stream config: channels={}, rate={}",
+                config.channels, config.sample_rate.0);
+            let audio_channels = config.channels as usize;
             let target_sample_rate = 16000;
             // device_samples_per_step is the number of *native* samples for one chunk before any processing.
             let device_samples_per_step = (native_sample_rate as f32 * (step_duration_ms_clone as f32 / 1000.0)) as usize;
+
+                        debug!("[Audio] Device config: Format={:?}, Rate={}, Channels={}",
+                default_config.sample_format(), native_sample_rate, audio_channels);
+
+            // Try to get supported configs
+            if let Ok(supported_configs) = device.supported_input_configs() {
+                debug!("[Audio] Supported input configurations:");
+                for conf in supported_configs {
+                    debug!("  - Rate: {:?}, Channels: {}, Format: {:?}",
+                        conf.min_sample_rate()..=conf.max_sample_rate(),
+                        conf.channels(),
+                        conf.sample_format());
+                }
+            }
 
             let resampler_opt = if native_sample_rate != target_sample_rate {
                 match FftFixedInOut::<f32>::new(
@@ -310,16 +412,19 @@ impl AudioInput {
 
             info!("[Audio] Starting capture. Native SR: {}, Target SR: {}, Channels: {}, Chunk Samples (native): {}", native_sample_rate, target_sample_rate, audio_channels, device_samples_per_step);
 
-            let stream_result = match config.sample_format() {
+            let stream_result = match default_config.sample_format() {
                 SampleFormat::F32 => {
+                    info!("[Audio] Attempting to access audio device...");
                     Self::process_audio_stream_internal::<f32, _>(
                         &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &f32| *s, stop_processing_signal.clone())
                 }
                 SampleFormat::I16 => {
+                    info!("[Audio] Attempting to access audio device...");
                     Self::process_audio_stream_internal::<i16, _>(
                         &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &i16| s.to_float_sample(), stop_processing_signal.clone())
                 }
                 SampleFormat::U16 => {
+                    info!("[Audio] Attempting to access audio device...");
                     Self::process_audio_stream_internal::<u16, _>(
                         &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &u16| s.to_float_sample(), stop_processing_signal.clone())
                 }
@@ -333,11 +438,13 @@ impl AudioInput {
 
             match stream_result {
                 Ok(stream) => {
-                    if stream.play().is_err() {
-                        error!("[Audio] Failed to play stream for device: {}", device_name_clone);
-                        let _ = tx.send(Err(WhisperStreamError::AudioDevice("Failed to play stream".to_string())));
+                    info!("[Audio] Successfully created audio stream, attempting to start capture...");
+                    if let Err(e) = stream.play() {
+                        error!("[Audio] Failed to play stream for device: {} ({})", device_name_clone, e);
+                        let _ = tx.send(Err(WhisperStreamError::AudioDevice(format!("Failed to play stream: {}", e))));
                         return;
                     }
+                    info!("[Audio] Audio capture started successfully!");
                     // Stream is playing; cpal callbacks handle audio processing.
                     // This thread keeps alive to monitor stop_processing_signal.
                     loop {

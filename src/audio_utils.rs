@@ -3,7 +3,7 @@ use hound::{WavWriter, WavSpec, SampleFormat};
 use crate::error::WhisperStreamError;
 use std::fs;
 use std::path::Path;
-use log::warn;
+use log::{warn, debug};
 
 /// Pads an audio segment with silence if it's shorter than `min_samples`.
 ///
@@ -78,7 +78,17 @@ impl WavAudioRecorder {
 	/// Samples should be in the range -1.0 to 1.0.
     pub fn write_audio_chunk(&mut self, audio_chunk: &[f32]) -> Result<(), WhisperStreamError> {
         if let Some(writer) = self.writer.as_mut() {
+            let mut min_sample = f32::INFINITY;
+            let mut max_sample = f32::NEG_INFINITY;
+            let mut non_zero_count = 0;
+
             for &sample_f32_original in audio_chunk {
+                min_sample = min_sample.min(sample_f32_original);
+                max_sample = max_sample.max(sample_f32_original);
+                if sample_f32_original != 0.0 {
+                    non_zero_count += 1;
+                }
+
                 let sample_f32 = if sample_f32_original.is_finite() {
                     sample_f32_original
                 } else {
@@ -87,15 +97,17 @@ impl WavAudioRecorder {
                 };
 
                 // Clamp to [-1.0, 1.0) then scale and cast
-                // The range of f32 is [-1.0, 1.0]. `1.0 - f32::EPSILON` is effectively the largest value less than 1.0.
                 let clamped_sample = sample_f32.clamp(-1.0, 1.0 - f32::EPSILON);
-                // Multiply by (i16::MAX as f32 + 1.0) which is 32768.0.
-                // This maps -1.0 to -32768 (i16::MIN) and values approaching 1.0 to 32767 (i16::MAX).
-                let sample_i16 = (clamped_sample * (i16::MAX as f32 + 1.0)) as i16;
+                // Scale to i16 range and round to nearest integer
+                let scaled = clamped_sample * i16::MAX as f32;
+                let sample_i16 = scaled.round() as i16;
                 if let Err(e) = writer.write_sample(sample_i16) {
                     return Err(WhisperStreamError::Hound { source: e });
                 }
             }
+
+            debug!("[WAV Writer] Chunk stats: len={}, non_zero={}, range=[{:.6}, {:.6}]",
+                audio_chunk.len(), non_zero_count, min_sample, max_sample);
         }
         Ok(())
     }
