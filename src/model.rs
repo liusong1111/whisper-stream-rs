@@ -73,8 +73,6 @@ impl FromStr for Model {
     }
 }
 
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
-const MODEL_FILENAME: &str = "ggml-base.en.bin";
 
 #[cfg(feature = "coreml")]
 const COREML_MODEL_URL_TEMPLATE: &str = "https://models.milan.place/whisper-cpp/metal//{}-encoder.mlmodelc.zip";
