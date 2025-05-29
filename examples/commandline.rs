@@ -141,17 +141,17 @@ fn main() -> anyhow::Result<()> {
 
     for event in rx {
         match event {
-            TranscriptionStreamEvent::ProvisionalLiveUpdate { text, score } => {
+            TranscriptionStreamEvent::ProvisionalLiveUpdate { text, is_low_quality } => {
                 partial_counter += 1;
                 // ProvisionalLiveUpdates overwrite the current line
-                print!("\r[P{}] (Score: {}) {}\x1b[K", partial_counter, score, text);
+                print!("\r[P{}] (Low Quality: {}) {}\x1b[K", partial_counter, is_low_quality, text);
                 let _ = stdout().flush();
             }
-            TranscriptionStreamEvent::SegmentTranscript { text, score } => {
+            TranscriptionStreamEvent::SegmentTranscript { text, is_low_quality } => {
                 // SegmentTranscripts also overwrite the current line (where provisionals were)
                 // and then we want subsequent output to be on a new line.
                 // The println! handles the newline for the next distinct output.
-                println!("\r[S] (Score: {}) {}\x1b[K", score, text); // Using [S] for Segment Transcript
+                println!("\r[S] (Low Quality: {}) {}\x1b[K", is_low_quality, text); // Using [S] for Segment Transcript
                 partial_counter = 0; // Reset counter
             }
             TranscriptionStreamEvent::SystemMessage(msg) => {

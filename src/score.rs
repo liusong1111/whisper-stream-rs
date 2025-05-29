@@ -1,16 +1,12 @@
-/// Calculates a score for a text based on specific patterns.
-///
-/// - Returns `10` for high-priority patterns (e.g., "[silence]", "(buzzer)") (case-insensitive start match).
-/// - Returns `5` if the text is enclosed in `[]` or `()` (e.g., "[some text]") and no high-priority pattern matched.
-/// - Returns `0` otherwise.
+/// Returns true if the text matches any low-quality output pattern (e.g., silence, blanks, bracketed/parenthesized).
 ///
 /// # Arguments
-/// * `text`: The input string to score.
+/// * `text`: The input string to check.
 ///
 /// # Returns
-/// The score: `10`, `5`, or `0`.
-pub fn calculate_score(text: &str) -> i32 {
-    let silence_indicators = [
+/// `true` if the text is considered low quality, `false` otherwise.
+pub fn is_low_quality_output(text: &str) -> bool {
+    let low_quality_patterns = [
         "[ Silence ]",
         "[silence]",
         "[BLANK",
@@ -23,28 +19,25 @@ pub fn calculate_score(text: &str) -> i32 {
         "(buzzing)",
     ];
 
-    // Prepare text for pattern matching (score 10)
-    // Trim leading whitespace and convert to lowercase for case-insensitive `starts_with`
+    // Prepare text for pattern matching (case-insensitive, trim leading whitespace)
     let text_start_lower = text.trim_start().to_lowercase();
 
-    // Check for high-priority patterns
-    if silence_indicators
+    // Check for any low-quality pattern
+    if low_quality_patterns
         .iter()
         .any(|p| text_start_lower.starts_with(&p.to_lowercase()))
     {
-        return 10; // Highest priority score
+        return true;
     }
 
-    // Score 5 for text fully enclosed in [] or ()
+    // Check if the text is fully enclosed in [] or ()
     let trimmed_text = text.trim();
-
-    // Check if the text is enclosed by matching brackets or parentheses
-    if trimmed_text.len() >= 2 && // Must have at least two chars to be an enclosure
+    if trimmed_text.len() >= 2 &&
         ((trimmed_text.starts_with('[') && trimmed_text.ends_with(']')) ||
          (trimmed_text.starts_with('(') && trimmed_text.ends_with(')')))
     {
-        return 5; // Score for bracketed/parenthesized text
+        return true;
     }
 
-    0 // Default score if no conditions met
+    false
 }

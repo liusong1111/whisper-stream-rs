@@ -14,5 +14,4 @@ pub use stream::{start_transcription_stream, TranscriptionStreamParams, Transcri
 // Re-exporting AudioInput for `AudioInput::available_input_devices()` and direct audio capture if needed.
 pub use audio::AudioInput;
 pub use error::WhisperStreamError;
-pub use score::calculate_score;
 pub use whisper_rs::install_logging_hooks;

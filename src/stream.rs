@@ -77,12 +77,16 @@ pub enum TranscriptionStreamEvent {
     /// `ProvisionalLiveUpdate` messages (providing more refined guesses for the same ongoing audio)
     /// or ultimately by a `SegmentTranscript` for that audio segment.
     /// These should not be stored or considered definitive.
-    ProvisionalLiveUpdate { text: String, score: i32 },
+    ///
+    /// `is_low_quality` is true if the text is considered low quality by the detector.
+    ProvisionalLiveUpdate { text: String, is_low_quality: bool },
 
     /// The final and complete transcription for a specific audio segment window
     /// (defined by `length_ms` in `TranscriptionStreamParams`). This is the version of the
     /// transcript that should be considered the actual output for that portion of audio.
-    SegmentTranscript { text: String, score: i32 },
+    ///
+    /// `is_low_quality` is true if the text is considered low quality by the detector.
+    SegmentTranscript { text: String, is_low_quality: bool },
 
     SystemMessage(String),
     Error(WhisperStreamError),
@@ -243,13 +247,13 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
             }
 
             if !current_text.trim().is_empty() {
-                let score = crate::score::calculate_score(&current_text);
+                let is_low_quality = crate::score::is_low_quality_output(&current_text);
                 if segment_window.len() >= n_samples_window {
                     // This iteration processed enough audio for a full segment based on length_ms.
-                    let _ = tx.send(TranscriptionStreamEvent::SegmentTranscript { text: current_text.clone(), score });
+                    let _ = tx.send(TranscriptionStreamEvent::SegmentTranscript { text: current_text.clone(), is_low_quality });
                 } else if config.compute_partials {
                     // This iteration is on an intermediate part of a segment, and partials are enabled.
-                    let _ = tx.send(TranscriptionStreamEvent::ProvisionalLiveUpdate { text: current_text.clone(), score });
+                    let _ = tx.send(TranscriptionStreamEvent::ProvisionalLiveUpdate { text: current_text.clone(), is_low_quality });
                 }
             }
 
@@ -289,8 +293,8 @@ pub fn start_transcription_stream(params: TranscriptionStreamParams) -> Receiver
                 }
                 if !final_text.trim().is_empty() {
                     // Final transcript for any remaining audio is always a SegmentTranscript.
-                    let score = crate::score::calculate_score(&final_text);
-                    let _ = tx.send(TranscriptionStreamEvent::SegmentTranscript { text: final_text, score });
+                    let is_low_quality = crate::score::is_low_quality_output(&final_text);
+                    let _ = tx.send(TranscriptionStreamEvent::SegmentTranscript { text: final_text, is_low_quality });
                 }
             }
         }

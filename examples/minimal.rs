@@ -20,15 +20,15 @@ fn main() -> anyhow::Result<()> {
 
     for event in rx {
         match event {
-            TranscriptionStreamEvent::ProvisionalLiveUpdate { text, score } => {
+            TranscriptionStreamEvent::ProvisionalLiveUpdate { text, is_low_quality } => {
                 // Overwrite the current line for live updates, clear rest of line with \x1b[K
-                print!("\r[Provisional] (Score: {}) {}\x1b[K", score, text);
+                print!("\r[Provisional] (Low Quality: {}) {}\x1b[K", is_low_quality, text);
                 let _ = stdout().flush(); // Ensure the update is displayed immediately
             }
-            TranscriptionStreamEvent::SegmentTranscript { text, score } => {
+            TranscriptionStreamEvent::SegmentTranscript { text, is_low_quality } => {
                 // Clear the current line (which might have a provisional transcript)
                 // and print the final segment, followed by a newline.
-                println!("\r[Segment] (Score: {}) {}\x1b[K", score, text);
+                println!("\r[Segment] (Low Quality: {}) {}\x1b[K", is_low_quality, text);
             }
             TranscriptionStreamEvent::SystemMessage(msg) => {
                 // Ensure system messages clear any provisional text and start on a new line if needed.
