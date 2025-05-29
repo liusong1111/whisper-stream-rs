@@ -24,7 +24,6 @@ pub struct AudioInput {
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
-    pub buffer_size: usize,
     step_duration_ms: u32,
 }
 
@@ -155,7 +154,6 @@ impl AudioInput {
             device_name,
             sample_rate,
             channels,
-            buffer_size,
             step_duration_ms: step_ms,
         })
     }
@@ -480,12 +478,4 @@ impl AudioInput {
         rx
     }
 
-    /// Signals the audio capture thread to stop.
-    ///
-    /// Sets an atomic flag checked by the capture thread, which will then
-    /// stop processing, allow cpal stream to drop, and exit.
-    pub fn stop_capture(stop_signal: Arc<AtomicBool>) {
-        debug!("[Audio] Setting stop signal for audio capture.");
-        stop_signal.store(true, Ordering::Relaxed);
-    }
 }
