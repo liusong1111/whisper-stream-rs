@@ -16,7 +16,7 @@ const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/ma
 const MODEL_FILENAME: &str = "ggml-base.en.bin";
 
 #[cfg(feature = "coreml")]
-const COREML_MODEL_URL_TEMPLATE: &str = "https://link.storjshare.io/raw/jw6gb7svwbcbhvzk6mtv3faunc3a/models.milan.place/whisper-cpp%2Fmetal/{}-encoder.mlmodelc.zip";
+const COREML_MODEL_URL_TEMPLATE: &str = "https://models.milan.place/whisper-cpp/metal//{}-encoder.mlmodelc.zip";
 #[cfg(feature = "coreml")]
 const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-base.en"; // Corresponds to ggml-base.en.bin
 
