@@ -3,7 +3,7 @@ use std::io::{stdout, Write}; // For flushing stdout
 
 fn main() -> anyhow::Result<()> {
     // Optional: Initialize a logger like env_logger to see internal logs from whisper-stream-rs and whisper_rs.
-    // Example: env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("[Minimal Example] Starting transcription with default parameters...");
     println!("[Minimal Example] Speak into your microphone. Press Ctrl+C to stop.\n");
