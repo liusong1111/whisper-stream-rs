@@ -93,9 +93,7 @@ impl AudioInput {
                 let preferred_idx = found_devices.iter()
                     .position(|(name, _)| {
                         name != &default_name && (
-                            name.contains("EarPods") ||
-                            name.contains("MacBook Pro-Mikrofon") ||
-                            !name.contains("Default")
+                            name.contains("MacBook Pro-Mikrofon")
                         )
                     });
 

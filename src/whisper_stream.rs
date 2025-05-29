@@ -332,7 +332,7 @@ impl WhisperStream {
             length_ms: 5000,
             keep_ms: 200,
             max_tokens: 32,
-            n_threads: std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4),
+            n_threads: std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(8),
             compute_partials: true,
             logging_enabled: true,
             model: None,
