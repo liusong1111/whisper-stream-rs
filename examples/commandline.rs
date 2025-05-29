@@ -96,9 +96,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(tokens) = args.max_tokens {
         params.max_tokens = tokens;
     }
-    if let Some(threads) = args.n_threads {
+if let Some(threads) = args.n_threads {
+    if threads > 0 {
         params.n_threads = threads;
+    } else {
+        anyhow::bail!("--n-threads must be a positive integer (got {threads})");
     }
+ }
     if let Some(device_name) = args.audio_device_name {
         params.audio_device_name = Some(device_name);
     }
