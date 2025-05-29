@@ -2,6 +2,12 @@
 name = "whisper-stream-rs"
 version = "0.3.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/milangress/whisper-stream-rs"
+documentation = "https://docs.rs/whisper-stream-rs"
+description = "A library for streaming transcription of audio using the Whisper model."
+authors = ["Milan"]
+
 
 [dependencies]
 whisper-rs = { version = "0.14.2", default-features = false, features = ["log_backend"] }
@@ -17,6 +23,7 @@ thiserror = "1.0"
 log = "0.4.21"
 env_logger = "0.11.3"
 zip = "0.6"
+
 
 [features]
 default = []
