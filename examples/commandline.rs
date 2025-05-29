@@ -1,6 +1,5 @@
 use whisper_stream_rs::{WhisperStream, Event, Model};
 use std::io::{stdout, Write};
-use env_logger;
 use clap::Parser;
 use std::str::FromStr;
 

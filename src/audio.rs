@@ -130,7 +130,6 @@ impl AudioInput {
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
-        let buffer_size = (sample_rate as f32 * (step_ms as f32 / 1000.0)) as usize * channels as usize;
 
         info!("[Audio] Attempting to use device: {}", device_name);
         info!("[Audio] Selected config: SampleRate({}), Channels({}), Format({})",
@@ -326,7 +325,7 @@ impl AudioInput {
             // Double-check permissions before starting capture
             let host = cpal::default_host();
             if let Err(e) = host.input_devices() {
-                error!("[Audio] No microphone access. Please check System Settings > Privacy & Security > Microphone");
+                error!("[Audio] No microphone access. Please check System Settings > Privacy & Security > Microphone: {}", e);
                 let _ = tx.send(Err(WhisperStreamError::AudioDevice(
                     "No microphone access. Please check System Settings > Privacy & Security > Microphone".to_string()
                 )));
@@ -426,17 +425,17 @@ impl AudioInput {
                 SampleFormat::F32 => {
                     info!("[Audio] Attempting to access audio device...");
                     Self::process_audio_stream_internal::<f32, _>(
-                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &f32| *s, stop_processing_signal.clone())
+                        &device, &config, tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &f32| *s, stop_processing_signal.clone())
                 }
                 SampleFormat::I16 => {
                     info!("[Audio] Attempting to access audio device...");
                     Self::process_audio_stream_internal::<i16, _>(
-                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &i16| s.to_float_sample(), stop_processing_signal.clone())
+                        &device, &config, tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &i16| s.to_float_sample(), stop_processing_signal.clone())
                 }
                 SampleFormat::U16 => {
                     info!("[Audio] Attempting to access audio device...");
                     Self::process_audio_stream_internal::<u16, _>(
-                        &device, &config.into(), tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &u16| s.to_float_sample(), stop_processing_signal.clone())
+                        &device, &config, tx_for_data_cb, audio_channels, device_samples_per_step, resampler_opt, tx_for_err_fn, |s: &u16| s.to_float_sample(), stop_processing_signal.clone())
                 }
                 other_format => {
                     let err_msg = format!("Unsupported sample format: {:?}", other_format);

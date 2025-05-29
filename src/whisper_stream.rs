@@ -136,7 +136,7 @@ impl WhisperStreamBuilder {
             use crate::audio::{AudioInput};
             use crate::audio_utils::{pad_audio_if_needed, WavAudioRecorder};
             use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
-            use log::{info, error};
+            use log::info;
             use std::sync::Arc;
 
             const MIN_WHISPER_SAMPLES: usize = 16800; // 1050ms at 16kHz (increased buffer)
