@@ -1,6 +1,5 @@
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::sync::Arc;
 use crate::model::Model;
 
 /// Events emitted by the transcription stream.
