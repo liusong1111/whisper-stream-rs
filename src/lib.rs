@@ -3,15 +3,12 @@
 //! A library for performing real-time transcription using Whisper ASR models.
 //! It handles audio capture, processing, and streaming results.
 
-pub mod audio;
-pub mod model;
-pub mod stream;
-pub mod error;
-pub mod audio_utils;
+mod audio;
+mod model;
+mod error;
+mod audio_utils;
 mod score;
-
-pub use stream::{start_transcription_stream, TranscriptionStreamParams, TranscriptionStreamEvent};
-// Re-exporting AudioInput for `AudioInput::available_input_devices()` and direct audio capture if needed.
-pub use audio::AudioInput;
+mod whisper_stream;
+// New public API
+pub use whisper_stream::{WhisperStream, Event};
 pub use error::WhisperStreamError;
-pub use whisper_rs::install_logging_hooks;
