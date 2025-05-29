@@ -1,7 +1,8 @@
-use whisper_stream_rs::{WhisperStream, Event};
+use whisper_stream_rs::{WhisperStream, Event, Model};
 use std::io::{stdout, Write};
 use env_logger;
 use clap::Parser;
+use std::str::FromStr;
 
 /// Command-line tool to stream audio from a microphone and transcribe it using whisper-stream-rs.
 #[derive(Parser, Debug)]
@@ -38,6 +39,10 @@ struct CliArgs {
     /// Path to save the recorded audio as a WAV file. If not set, audio is not recorded to disk.
     #[clap(short, long)]
     record_to_wav: Option<String>,
+
+    /// Model to use for transcription (e.g., "base.en", "tiny.en", "small.en").
+    #[clap(long)]
+    model: Option<String>,
 
     /// Disable computation and sending of partial (intermediate) transcripts.
     #[clap(long, action = clap::ArgAction::SetFalse)]
@@ -77,6 +82,25 @@ fn main() -> anyhow::Result<()> {
     let audio_device_name = args.audio_device_name.clone();
     let language = args.language.clone();
     let record_to_wav = args.record_to_wav.clone();
+    let available_models = WhisperStream::list_models();
+    let available_models_str = available_models.iter()
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let model = if let Some(model_str) = &args.model {
+        match Model::from_str(model_str) {
+            Ok(m) => Some(m),
+            Err(_) => {
+                eprintln!(
+                    "[Error] Unknown model: '{}'. Available: {}",
+                    model_str, available_models_str
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     let mut builder = WhisperStream::builder();
 
     if let Some(lang) = args.language {
@@ -107,10 +131,15 @@ fn main() -> anyhow::Result<()> {
     if let Some(record_path) = args.record_to_wav {
         builder = builder.record_to_wav(&record_path);
     }
+    if let Some(m) = model {
+        builder = builder.model(m);
+    }
     builder = builder.compute_partials(args.compute_partials);
 
+    let selected_model = model.unwrap_or(Model::BaseEn);
     println!("--- Transcription Configuration ---");
     println!("Audio Device:     {}", audio_device_name.as_deref().unwrap_or("Default System Device"));
+    println!("Model:            {}", selected_model);
     println!("Step Duration:    {}ms", args.step_ms.unwrap_or(800));
     println!("Window Length:    {}ms", args.length_ms.unwrap_or(5000));
     println!("Keep Context:     {}ms", args.keep_ms.unwrap_or(200));

@@ -1,6 +1,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::sync::Arc;
+use crate::model::Model;
 
 /// Events emitted by the transcription stream.
 ///
@@ -35,8 +36,8 @@ pub enum Event {
 ///
 /// Example:
 /// ```no_run
-/// use whisper_stream_rs::{WhisperStream, Event};
-/// let (_stream, rx) = WhisperStream::builder().language("en").build().unwrap();
+/// use whisper_stream_rs::{WhisperStream, Event, Model};
+/// let (_stream, rx) = WhisperStream::builder().model(Model::TinyEn).build().unwrap();
 /// for event in rx {
 ///     match event {
 ///         Event::SegmentTranscript { text, .. } => println!("Final: {}", text),
@@ -54,11 +55,11 @@ pub struct WhisperStream {
 ///
 /// Example:
 /// ```no_run
-/// use whisper_stream_rs::WhisperStream;
+/// use whisper_stream_rs::{WhisperStream, Model};
 /// let (_stream, rx) = WhisperStream::builder()
 ///     .device("MacBook Pro Microphone")
 ///     .language("en")
-///     .record_to_wav("out.wav")
+///     .model(Model::SmallEn)
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -73,6 +74,7 @@ pub struct WhisperStreamBuilder {
     n_threads: i32,
     compute_partials: bool,
     logging_enabled: bool,
+    model: Option<Model>,
 }
 
 impl WhisperStreamBuilder {
@@ -116,6 +118,10 @@ impl WhisperStreamBuilder {
         self.logging_enabled = false;
         self
     }
+    pub fn model(mut self, model: Model) -> Self {
+        self.model = Some(model);
+        self
+    }
     pub fn build(self) -> Result<(WhisperStream, Receiver<Event>), crate::error::WhisperStreamError> {
         // Set up logging if enabled
         if self.logging_enabled {
@@ -125,6 +131,7 @@ impl WhisperStreamBuilder {
 
         let (tx, rx) = mpsc::channel();
         let config = self;
+        let selected_model = config.model.unwrap_or(Model::BaseEn);
         thread::spawn(move || {
             use crate::model::ensure_model;
             use crate::audio::{AudioInput};
@@ -135,7 +142,7 @@ impl WhisperStreamBuilder {
 
             const MIN_WHISPER_SAMPLES: usize = 16800; // 1050ms at 16kHz (increased buffer)
 
-            let model_path = match ensure_model() {
+            let model_path = match ensure_model(selected_model) {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = tx.send(Event::Error(e));
@@ -329,10 +336,14 @@ impl WhisperStream {
             n_threads: std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4),
             compute_partials: true,
             logging_enabled: true,
+            model: None,
         }
     }
     pub fn list_devices() -> Result<Vec<String>, crate::error::WhisperStreamError> {
         crate::audio::AudioInput::available_input_devices()
+    }
+    pub fn list_models() -> Vec<Model> {
+        Model::list()
     }
     pub fn start(&mut self) -> Result<(), crate::error::WhisperStreamError> {
         // Will start the background thread in next phase

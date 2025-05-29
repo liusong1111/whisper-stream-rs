@@ -3,6 +3,8 @@ use std::fs;
 use std::io::{self, Write};
 use crate::error::WhisperStreamError;
 use log::{info};
+use std::fmt;
+use std::str::FromStr;
 
 #[cfg(feature = "coreml")]
 use zip::ZipArchive;
@@ -11,6 +13,65 @@ use std::fs::File;
 #[cfg(feature = "coreml")]
 use log::{warn};
 
+/// Supported Whisper models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Model {
+    /// The default model: base.en
+    BaseEn,
+    /// The tiny.en model
+    TinyEn,
+    /// The small.en model
+    SmallEn,
+}
+
+impl Model {
+    /// Returns the user-facing name for this model (e.g., "base.en").
+    pub fn name(&self) -> &'static str {
+        match self {
+            Model::BaseEn => "base.en",
+            Model::TinyEn => "tiny.en",
+            Model::SmallEn => "small.en",
+        }
+    }
+    /// Returns the model file name (e.g., "ggml-base.en.bin").
+    pub fn file_name(&self) -> &'static str {
+        match self {
+            Model::BaseEn => "ggml-base.en.bin",
+            Model::TinyEn => "ggml-tiny.en.bin",
+            Model::SmallEn => "ggml-small.en.bin",
+        }
+    }
+    /// Returns the model download URL.
+    pub fn url(&self) -> &'static str {
+        match self {
+            Model::BaseEn => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+            Model::TinyEn => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+            Model::SmallEn => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        }
+    }
+    /// Returns all supported models.
+    pub fn list() -> Vec<Model> {
+        vec![Model::BaseEn, Model::TinyEn, Model::SmallEn]
+    }
+}
+
+impl fmt::Display for Model {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+impl FromStr for Model {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "base.en" => Ok(Model::BaseEn),
+            "tiny.en" => Ok(Model::TinyEn),
+            "small.en" => Ok(Model::SmallEn),
+            _ => Err(()),
+        }
+    }
+}
 
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 const MODEL_FILENAME: &str = "ggml-base.en.bin";
@@ -21,7 +82,7 @@ const COREML_MODEL_URL_TEMPLATE: &str = "https://models.milan.place/whisper-cpp/
 const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-base.en"; // Corresponds to ggml-base.en.bin
 
 /// Ensures the Whisper model (and CoreML model if 'coreml' feature is enabled) is present, downloading if necessary.
-pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
+pub fn ensure_model(model: Model) -> Result<PathBuf, WhisperStreamError> {
     let cache_dir = dirs::data_local_dir()
         .ok_or_else(|| WhisperStreamError::Io {
             source: io::Error::new(io::ErrorKind::NotFound, "Could not find local data dir")
@@ -30,11 +91,11 @@ pub fn ensure_model() -> Result<PathBuf, WhisperStreamError> {
 
     fs::create_dir_all(&cache_dir).map_err(WhisperStreamError::from)?;
 
-    let model_path = cache_dir.join(MODEL_FILENAME);
+    let model_path = cache_dir.join(model.file_name());
 
     if !model_path.exists() {
         info!("Downloading Whisper model to {}...", model_path.display());
-        download_file(MODEL_URL, &model_path)?;
+        download_file(model.url(), &model_path)?;
         info!("Whisper model downloaded.");
     }
 
