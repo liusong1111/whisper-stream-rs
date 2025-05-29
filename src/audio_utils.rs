@@ -148,3 +148,48 @@ impl WavAudioRecorder {
         self.is_recording_active
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn test_pad_audio_if_needed_no_padding() {
+        let input = vec![0.1, 0.2, 0.3];
+        let result = pad_audio_if_needed(&input, 3);
+        assert_eq!(&*result, &[0.1, 0.2, 0.3]);
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_pad_audio_if_needed_with_padding() {
+        let input = vec![0.1, 0.2];
+        let result = pad_audio_if_needed(&input, 4);
+        assert_eq!(&*result, &[0.1, 0.2, 0.0, 0.0]);
+        assert!(matches!(result, std::borrow::Cow::Owned(_)));
+    }
+
+    #[test]
+    fn test_wav_audio_recorder_write_and_finalize() {
+        let test_path = "test_output.wav";
+        // Clean up before test
+        let _ = fs::remove_file(test_path);
+        let mut recorder = WavAudioRecorder::new(Some(test_path)).expect("Failed to create recorder");
+        assert!(recorder.is_recording());
+        let audio_chunk = vec![0.0f32, 0.5, -0.5, 1.0, -1.0];
+        recorder.write_audio_chunk(&audio_chunk).expect("Failed to write chunk");
+        let msg = recorder.finalize().expect("Failed to finalize");
+        assert!(msg.is_some());
+        assert!(Path::new(test_path).exists());
+        // Clean up after test
+        let _ = fs::remove_file(test_path);
+    }
+
+    #[test]
+    fn test_wav_audio_recorder_no_path() {
+        let recorder = WavAudioRecorder::new(None).expect("Failed to create recorder");
+        assert!(!recorder.is_recording());
+    }
+}
