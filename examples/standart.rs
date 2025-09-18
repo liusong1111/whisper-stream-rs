@@ -1,10 +1,9 @@
-use whisper_stream_rs::{WhisperStream, Event};
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
+use whisper_stream_rs::{Event, WhisperStream};
 
 fn main() -> anyhow::Result<()> {
     // Show available audio devices and models
     println!("Available devices: {:?}", WhisperStream::list_devices()?);
-    println!("Available models: {:?}", WhisperStream::list_models());
 
     // Hardcoded config: record to WAV, set language, adjust params
     let (_stream, rx) = WhisperStream::builder()
@@ -21,17 +20,29 @@ fn main() -> anyhow::Result<()> {
     let mut prev_provisional_low_quality = false;
     for event in rx {
         match event {
-            Event::ProvisionalLiveUpdate { text, is_low_quality } => {
+            Event::ProvisionalLiveUpdate {
+                text,
+                is_low_quality,
+            } => {
                 if is_low_quality && prev_provisional_low_quality {
                     // Skip printing if both current and previous are low quality
                     continue;
                 }
-                print!("\r[Provisional] (Low Quality: {}) {}\x1b[K", is_low_quality, text);
+                print!(
+                    "\r[Provisional] (Low Quality: {}) {}\x1b[K",
+                    is_low_quality, text
+                );
                 let _ = stdout().flush();
                 prev_provisional_low_quality = is_low_quality;
             }
-            Event::SegmentTranscript { text, is_low_quality } => {
-                println!("\r[Segment] (Low Quality: {}) {}\x1b[K", is_low_quality, text);
+            Event::SegmentTranscript {
+                text,
+                is_low_quality,
+            } => {
+                println!(
+                    "\r[Segment] (Low Quality: {}) {}\x1b[K",
+                    is_low_quality, text
+                );
                 prev_provisional_low_quality = false; // Reset on segment
             }
             Event::SystemMessage(msg) => {

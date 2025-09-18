@@ -4,12 +4,12 @@
 //! It handles audio capture, processing, and streaming results.
 
 mod audio;
-mod model;
-mod error;
 mod audio_utils;
+mod error;
+mod model;
 mod score;
 mod whisper_stream;
 // New public API
-pub use whisper_stream::{WhisperStream, Event};
 pub use error::WhisperStreamError;
-pub use model::Model;
+pub use model::{DEFAULT_MODEL, ensure_model};
+pub use whisper_stream::{Event, WhisperStream};

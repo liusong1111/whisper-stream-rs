@@ -1,6 +1,7 @@
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use crate::model::Model;
+
+use crate::model::DEFAULT_MODEL;
 
 /// Events emitted by the transcription stream.
 ///
@@ -73,7 +74,8 @@ pub struct WhisperStreamBuilder {
     n_threads: i32,
     compute_partials: bool,
     logging_enabled: bool,
-    model: Option<Model>,
+    // use model path instead
+    model: Option<String>,
 }
 
 impl WhisperStreamBuilder {
@@ -117,11 +119,13 @@ impl WhisperStreamBuilder {
         self.logging_enabled = false;
         self
     }
-    pub fn model(mut self, model: Model) -> Self {
+    pub fn model(mut self, model: String) -> Self {
         self.model = Some(model);
         self
     }
-    pub fn build(self) -> Result<(WhisperStream, Receiver<Event>), crate::error::WhisperStreamError> {
+    pub fn build(
+        self,
+    ) -> Result<(WhisperStream, Receiver<Event>), crate::error::WhisperStreamError> {
         // Set up logging if enabled
         if self.logging_enabled {
             // Safe to call multiple times; only installs once
@@ -130,18 +134,20 @@ impl WhisperStreamBuilder {
 
         let (tx, rx) = mpsc::channel();
         let config = self;
-        let selected_model = config.model.unwrap_or(Model::BaseEn);
+        let selected_model = config.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
         thread::spawn(move || {
+            use crate::audio::AudioInput;
+            use crate::audio_utils::{WavAudioRecorder, pad_audio_if_needed};
             use crate::model::ensure_model;
-            use crate::audio::{AudioInput};
-            use crate::audio_utils::{pad_audio_if_needed, WavAudioRecorder};
-            use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
             use log::info;
             use std::sync::Arc;
+            use whisper_rs::{
+                FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
+            };
 
             const MIN_WHISPER_SAMPLES: usize = 16800; // 1050ms at 16kHz (increased buffer)
 
-            let model_path = match ensure_model(selected_model) {
+            let model_path = match ensure_model(&selected_model) {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = tx.send(Event::Error(e));
@@ -172,8 +178,10 @@ impl WhisperStreamBuilder {
             };
             let audio_rx = audio_input.start_capture_16k();
             let sample_rate = 16000;
-            let n_samples_window = (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
-            let n_samples_overlap = (sample_rate as f32 * (config.keep_ms as f32 / 1000.0)) as usize;
+            let n_samples_window =
+                (sample_rate as f32 * (config.length_ms as f32 / 1000.0)) as usize;
+            let n_samples_overlap =
+                (sample_rate as f32 * (config.keep_ms as f32 / 1000.0)) as usize;
             let mut segment_window: Vec<f32> = Vec::with_capacity(n_samples_window);
             let mut state = match ctx.create_state() {
                 Ok(s) => s,
@@ -195,21 +203,25 @@ impl WhisperStreamBuilder {
             }
             let arc_params_full = Arc::new(params_full);
 
-            let mut wav_audio_recorder = match WavAudioRecorder::new(config.record_to_wav.as_deref()) {
-                Ok(recorder) => recorder,
-                Err(e) => {
-                    let _ = tx.send(Event::Error(e));
-                    match WavAudioRecorder::new(None) {
-                        Ok(no_op_recorder) => no_op_recorder,
-                        Err(_) => return,
+            let mut wav_audio_recorder =
+                match WavAudioRecorder::new(config.record_to_wav.as_deref()) {
+                    Ok(recorder) => recorder,
+                    Err(e) => {
+                        let _ = tx.send(Event::Error(e));
+                        match WavAudioRecorder::new(None) {
+                            Ok(no_op_recorder) => no_op_recorder,
+                            Err(_) => return,
+                        }
                     }
-                }
-            };
+                };
 
             if wav_audio_recorder.is_recording() {
                 if let Some(path_str) = config.record_to_wav.as_ref() {
                     info!("[Recording] Saving transcribed audio to {}...", path_str);
-                    let _ = tx.send(Event::SystemMessage(format!("[Recording] Saving transcribed audio to {}...", path_str)));
+                    let _ = tx.send(Event::SystemMessage(format!(
+                        "[Recording] Saving transcribed audio to {}...",
+                        path_str
+                    )));
                 }
             }
 
@@ -234,9 +246,11 @@ impl WhisperStreamBuilder {
                 }
 
                 segment_window.extend_from_slice(&pcmf32_new);
-                let audio_for_processing = pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
+                let audio_for_processing =
+                    pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
 
-                if let Err(e) = state.full(arc_params_full.as_ref().clone(), &audio_for_processing) {
+                if let Err(e) = state.full(arc_params_full.as_ref().clone(), &audio_for_processing)
+                {
                     let _ = tx.send(Event::Error(crate::error::WhisperStreamError::from(e)));
                     continue;
                 }
@@ -248,7 +262,9 @@ impl WhisperStreamBuilder {
                             match state.full_get_segment_text(i) {
                                 Ok(seg) => current_text.push_str(&seg),
                                 Err(e) => {
-                                    let _ = tx.send(Event::Error(crate::error::WhisperStreamError::from(e)));
+                                    let _ = tx.send(Event::Error(
+                                        crate::error::WhisperStreamError::from(e),
+                                    ));
                                     break;
                                 }
                             }
@@ -263,15 +279,22 @@ impl WhisperStreamBuilder {
                 if !current_text.trim().is_empty() {
                     let is_low_quality = crate::score::is_low_quality_output(&current_text);
                     if segment_window.len() >= n_samples_window {
-                        let _ = tx.send(Event::SegmentTranscript { text: current_text.clone(), is_low_quality });
+                        let _ = tx.send(Event::SegmentTranscript {
+                            text: current_text.clone(),
+                            is_low_quality,
+                        });
                     } else if config.compute_partials {
-                        let _ = tx.send(Event::ProvisionalLiveUpdate { text: current_text.clone(), is_low_quality });
+                        let _ = tx.send(Event::ProvisionalLiveUpdate {
+                            text: current_text.clone(),
+                            is_low_quality,
+                        });
                     }
                 }
 
                 if segment_window.len() >= n_samples_window {
                     if n_samples_overlap > 0 && segment_window.len() > n_samples_overlap {
-                        segment_window = segment_window[segment_window.len() - n_samples_overlap..].to_vec();
+                        segment_window =
+                            segment_window[segment_window.len() - n_samples_overlap..].to_vec();
                     } else {
                         segment_window.clear();
                     }
@@ -279,8 +302,12 @@ impl WhisperStreamBuilder {
             }
 
             if !segment_window.is_empty() {
-                let final_audio_for_processing = pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
-                if let Err(e) = state.full(arc_params_full.as_ref().clone(), &final_audio_for_processing) {
+                let final_audio_for_processing =
+                    pad_audio_if_needed(&segment_window, MIN_WHISPER_SAMPLES);
+                if let Err(e) = state.full(
+                    arc_params_full.as_ref().clone(),
+                    &final_audio_for_processing,
+                ) {
                     let _ = tx.send(Event::Error(crate::error::WhisperStreamError::from(e)));
                 } else {
                     let mut final_text = String::new();
@@ -290,19 +317,25 @@ impl WhisperStreamBuilder {
                                 match state.full_get_segment_text(i) {
                                     Ok(seg) => final_text.push_str(&seg),
                                     Err(e) => {
-                                        let _ = tx.send(Event::Error(crate::error::WhisperStreamError::from(e)));
+                                        let _ = tx.send(Event::Error(
+                                            crate::error::WhisperStreamError::from(e),
+                                        ));
                                         break;
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Event::Error(crate::error::WhisperStreamError::from(e)));
+                            let _ =
+                                tx.send(Event::Error(crate::error::WhisperStreamError::from(e)));
                         }
                     }
                     if !final_text.trim().is_empty() {
                         let is_low_quality = crate::score::is_low_quality_output(&final_text);
-                        let _ = tx.send(Event::SegmentTranscript { text: final_text, is_low_quality });
+                        let _ = tx.send(Event::SegmentTranscript {
+                            text: final_text,
+                            is_low_quality,
+                        });
                     }
                 }
             }
@@ -332,7 +365,9 @@ impl WhisperStream {
             length_ms: 5000,
             keep_ms: 200,
             max_tokens: 32,
-            n_threads: std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(8),
+            n_threads: std::thread::available_parallelism()
+                .map(|n| n.get() as i32)
+                .unwrap_or(8),
             compute_partials: true,
             logging_enabled: true,
             model: None,
@@ -340,9 +375,6 @@ impl WhisperStream {
     }
     pub fn list_devices() -> Result<Vec<String>, crate::error::WhisperStreamError> {
         crate::audio::AudioInput::available_input_devices()
-    }
-    pub fn list_models() -> Vec<Model> {
-        Model::list()
     }
     pub fn start(&mut self) -> Result<(), crate::error::WhisperStreamError> {
         // Will start the background thread in next phase
