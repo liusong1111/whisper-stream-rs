@@ -1,5 +1,5 @@
-use whisper_stream_rs::{WhisperStream, Event};
-use std::io::{stdout, Write}; // For flushing stdout
+use std::io::{Write, stdout};
+use whisper_stream_rs::{Event, WhisperInstance, WhisperStream}; // For flushing stdout
 
 fn main() -> anyhow::Result<()> {
     // Optional: Initialize a logger like env_logger to see internal logs from whisper-stream-rs and whisper_rs.
@@ -8,19 +8,31 @@ fn main() -> anyhow::Result<()> {
     println!("[Minimal Example] Starting transcription with default parameters...");
     println!("[Minimal Example] Speak into your microphone. Press Ctrl+C to stop.\n");
 
-    let (_stream, rx) = WhisperStream::builder().build()?;
+    let WhisperInstance { stream: _, rx } = WhisperStream::builder().build()?;
 
     for event in rx {
         match event {
-            Event::ProvisionalLiveUpdate { text, is_low_quality } => {
+            Event::ProvisionalLiveUpdate {
+                text,
+                is_low_quality,
+            } => {
                 // Overwrite the current line for live updates, clear rest of line with \x1b[K
-                print!("\r[Provisional] (Low Quality: {}) {}\x1b[K", is_low_quality, text);
+                print!(
+                    "\r[Provisional] (Low Quality: {}) {}\x1b[K",
+                    is_low_quality, text
+                );
                 let _ = stdout().flush(); // Ensure the update is displayed immediately
             }
-            Event::SegmentTranscript { text, is_low_quality } => {
+            Event::SegmentTranscript {
+                text,
+                is_low_quality,
+            } => {
                 // Clear the current line (which might have a provisional transcript)
                 // and print the final segment, followed by a newline.
-                println!("\r[Segment] (Low Quality: {}) {}\x1b[K", is_low_quality, text);
+                println!(
+                    "\r[Segment] (Low Quality: {}) {}\x1b[K",
+                    is_low_quality, text
+                );
             }
             Event::SystemMessage(msg) => {
                 // Ensure system messages clear any provisional text and start on a new line if needed.

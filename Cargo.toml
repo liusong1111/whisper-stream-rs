@@ -34,5 +34,22 @@ vulkan = ["whisper-rs/vulkan"]
 name = "commandline"
 path = "examples/commandline.rs"
 
+[[example]]
+name = "stt-server"
+path = "examples/stt-server.rs"
+
 [dev-dependencies]
 clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2.5.7"
+toml = "0.9.5"
+smart-default = "0.7.1"
+axum = { version = "0.8.4", features = ["macros", "ws", "http2"] }
+bs58 = "0.5.1"
+tokio = { version = "1.46.1", features = ["full"] }
+tower-http = { version = "0.6.6", features = ["cors", "full"] }
+ulid = "1.2.1"
+wyhash = "0.6.0"
+futures = "0.3.31"
+tokio-stream = { version = "0.1.17", features = ["full"] }

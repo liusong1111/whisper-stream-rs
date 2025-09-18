@@ -63,6 +63,7 @@ pub struct WhisperStream {
 ///     .build()
 ///     .unwrap();
 /// ```
+#[derive(Debug, Clone)]
 pub struct WhisperStreamBuilder {
     device: Option<String>,
     language: Option<String>,
@@ -76,6 +77,11 @@ pub struct WhisperStreamBuilder {
     logging_enabled: bool,
     // use model path instead
     model: Option<String>,
+}
+
+pub struct WhisperInstance {
+    pub stream: WhisperStream,
+    pub rx: Receiver<Event>,
 }
 
 impl WhisperStreamBuilder {
@@ -123,9 +129,9 @@ impl WhisperStreamBuilder {
         self.model = Some(model);
         self
     }
-    pub fn build(
-        self,
-    ) -> Result<(WhisperStream, Receiver<Event>), crate::error::WhisperStreamError> {
+
+    pub fn build(self) -> Result<WhisperInstance, crate::error::WhisperStreamError> {
+        // ) -> Result<(WhisperStream, Receiver<Event>), crate::error::WhisperStreamError> {
         // Set up logging if enabled
         if self.logging_enabled {
             // Safe to call multiple times; only installs once
@@ -351,7 +357,11 @@ impl WhisperStreamBuilder {
                 }
             }
         });
-        Ok((WhisperStream {}, rx))
+
+        Ok(WhisperInstance {
+            stream: WhisperStream {},
+            rx,
+        })
     }
 }
 

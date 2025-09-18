@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::io::{Write, stdout};
-use whisper_stream_rs::{DEFAULT_MODEL, Event, WhisperStream};
+use whisper_stream_rs::{DEFAULT_MODEL, Event, WhisperInstance, WhisperStream};
 
 /// Command-line tool to stream audio from a microphone and transcribe it using whisper-stream-rs.
 #[derive(Parser, Debug)]
@@ -148,7 +148,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!("---------------------------------");
 
-    let (_stream, rx) = builder.build()?;
+    let WhisperInstance { stream: _, rx } = builder.build()?;
 
     println!("\n[System] Start speaking... (Press Ctrl+C to stop)\n");
 

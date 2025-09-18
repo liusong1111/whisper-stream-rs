@@ -12,4 +12,4 @@ mod whisper_stream;
 // New public API
 pub use error::WhisperStreamError;
 pub use model::{DEFAULT_MODEL, ensure_model};
-pub use whisper_stream::{Event, WhisperStream};
+pub use whisper_stream::{Event, WhisperInstance, WhisperStream, WhisperStreamBuilder};

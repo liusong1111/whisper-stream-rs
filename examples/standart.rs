@@ -1,12 +1,12 @@
 use std::io::{Write, stdout};
-use whisper_stream_rs::{Event, WhisperStream};
+use whisper_stream_rs::{Event, WhisperInstance, WhisperStream};
 
 fn main() -> anyhow::Result<()> {
     // Show available audio devices and models
     println!("Available devices: {:?}", WhisperStream::list_devices()?);
 
     // Hardcoded config: record to WAV, set language, adjust params
-    let (_stream, rx) = WhisperStream::builder()
+    let WhisperInstance { stream: _, rx } = WhisperStream::builder()
         .language("en")
         .record_to_wav("recorded_audio.wav")
         .step_ms(500)
