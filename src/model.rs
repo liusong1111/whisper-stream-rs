@@ -1,17 +1,17 @@
-use std::path::{PathBuf, Path};
+use crate::error::WhisperStreamError;
+use log::info;
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
-use crate::error::WhisperStreamError;
-use log::{info};
-use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[cfg(feature = "coreml")]
-use zip::ZipArchive;
+use log::warn;
 #[cfg(feature = "coreml")]
 use std::fs::File;
 #[cfg(feature = "coreml")]
-use log::{warn};
+use zip::ZipArchive;
 
 /// Supported Whisper models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,17 +36,26 @@ impl Model {
     /// Returns the model file name (e.g., "ggml-base.en.bin").
     pub fn file_name(&self) -> &'static str {
         match self {
-            Model::BaseEn => "ggml-base.en.bin",
-            Model::TinyEn => "ggml-tiny.en.bin",
-            Model::SmallEn => "ggml-small.en.bin",
+            // Model::BaseEn => "ggml-base.en.bin",
+            // Model::TinyEn => "ggml-tiny.en.bin",
+            // Model::SmallEn => "ggml-small.en.bin",
+            Model::BaseEn => "ggml-large-v3-turbo-q5_0.bin",
+            Model::TinyEn => "ggml-large-v3-turbo-q5_0.bin",
+            Model::SmallEn => "ggml-large-v3-turbo-q5_0.bin",
         }
     }
     /// Returns the model download URL.
     pub fn url(&self) -> &'static str {
         match self {
-            Model::BaseEn => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-            Model::TinyEn => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-            Model::SmallEn => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+            Model::BaseEn => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+            }
+            Model::TinyEn => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
+            }
+            Model::SmallEn => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
+            }
         }
     }
     /// Returns all supported models.
@@ -73,23 +82,25 @@ impl FromStr for Model {
     }
 }
 
-
 #[cfg(feature = "coreml")]
-const COREML_MODEL_URL_TEMPLATE: &str = "https://models.milan.place/whisper-cpp/metal//{}-encoder.mlmodelc.zip";
+const COREML_MODEL_URL_TEMPLATE: &str =
+    "https://models.milan.place/whisper-cpp/metal//{}-encoder.mlmodelc.zip";
 #[cfg(feature = "coreml")]
-const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-base.en"; // Corresponds to ggml-base.en.bin
+// const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-base.en"; // Corresponds to ggml-base.en.bin
+const BASE_MODEL_NAME_FOR_COREML: &str = "ggml-large-v3-turbo-q5_0.bin"; // Corresponds to ggml-base.en.bin
 
 /// Ensures the Whisper model (and CoreML model if 'coreml' feature is enabled) is present, downloading if necessary.
 pub fn ensure_model(model: Model) -> Result<PathBuf, WhisperStreamError> {
     let cache_dir = dirs::data_local_dir()
         .ok_or_else(|| WhisperStreamError::Io {
-            source: io::Error::new(io::ErrorKind::NotFound, "Could not find local data dir")
+            source: io::Error::new(io::ErrorKind::NotFound, "Could not find local data dir"),
         })?
         .join("whisper-stream-rs");
 
     fs::create_dir_all(&cache_dir).map_err(WhisperStreamError::from)?;
 
     let model_path = cache_dir.join(model.file_name());
+    println!("model_path: {:?}", model_path);
 
     if !model_path.exists() {
         info!("Downloading Whisper model to {}...", model_path.display());
@@ -117,7 +128,11 @@ fn ensure_coreml_model_if_enabled(cache_dir: &Path) -> Result<(), WhisperStreamE
         let coreml_zip_filename = format!("{}-encoder.mlmodelc.zip", coreml_base_name);
         let coreml_zip_path = cache_dir.join(&coreml_zip_filename);
 
-        info!("Downloading CoreML model from {} to {}...", coreml_model_zip_url, coreml_zip_path.display());
+        info!(
+            "Downloading CoreML model from {} to {}...",
+            coreml_model_zip_url,
+            coreml_zip_path.display()
+        );
         download_file(&coreml_model_zip_url, &coreml_zip_path)?;
         info!("CoreML model ZIP downloaded.");
 
@@ -125,51 +140,84 @@ fn ensure_coreml_model_if_enabled(cache_dir: &Path) -> Result<(), WhisperStreamE
         if let Err(e) = unzip_file(&coreml_zip_path, &cache_dir) {
             // Attempt to clean up the potentially corrupted zip file or partial extraction
             if let Err(remove_err) = fs::remove_file(&coreml_zip_path) {
-                warn!("Failed to remove zip file {} during cleanup: {}", coreml_zip_path.display(), remove_err);
+                warn!(
+                    "Failed to remove zip file {} during cleanup: {}",
+                    coreml_zip_path.display(),
+                    remove_err
+                );
             }
             if let Err(remove_dir_err) = fs::remove_dir_all(&coreml_model_dir_path) {
-                warn!("Failed to remove directory {} during cleanup: {}", coreml_model_dir_path.display(), remove_dir_err);
+                warn!(
+                    "Failed to remove directory {} during cleanup: {}",
+                    coreml_model_dir_path.display(),
+                    remove_dir_err
+                );
             }
             // The error is returned from this function, so no need for error! here, caller handles it.
             return Err(e);
         }
-        info!("CoreML model unzipped and available at {}.", coreml_model_dir_path.display());
+        info!(
+            "CoreML model unzipped and available at {}.",
+            coreml_model_dir_path.display()
+        );
 
         // Clean up the downloaded zip file after successful extraction
         if fs::remove_file(&coreml_zip_path).is_err() {
-            warn!("Could not remove CoreML zip file: {}", coreml_zip_path.display());
+            warn!(
+                "Could not remove CoreML zip file: {}",
+                coreml_zip_path.display()
+            );
         }
     } else {
-        info!("CoreML model already present at {}.", coreml_model_dir_path.display());
+        info!(
+            "CoreML model already present at {}.",
+            coreml_model_dir_path.display()
+        );
     }
     Ok(())
 }
 
 fn download_file(url: &str, path: &Path) -> Result<(), WhisperStreamError> {
-    let mut resp = reqwest::blocking::get(url)
-        .map_err(|e| WhisperStreamError::ModelFetch(format!("Failed to initiate download from {}: {}", url, e)))?;
+    let mut resp = reqwest::blocking::get(url).map_err(|e| {
+        WhisperStreamError::ModelFetch(format!("Failed to initiate download from {}: {}", url, e))
+    })?;
 
     if !resp.status().is_success() {
-        return Err(WhisperStreamError::ModelFetch(format!("Failed to download from {}: HTTP Status {}", url, resp.status())));
+        return Err(WhisperStreamError::ModelFetch(format!(
+            "Failed to download from {}: HTTP Status {}",
+            url,
+            resp.status()
+        )));
     }
 
-    let mut out = fs::File::create(path)
-        .map_err(|e| WhisperStreamError::Io { source: e })?;
+    let mut out = fs::File::create(path).map_err(|e| WhisperStreamError::Io { source: e })?;
 
-    io::copy(&mut resp, &mut out)
-        .map_err(|e| WhisperStreamError::Io { source: e })?;
+    io::copy(&mut resp, &mut out).map_err(|e| WhisperStreamError::Io { source: e })?;
 
-    out.flush().map_err(|e| WhisperStreamError::Io { source: e })?;
+    out.flush()
+        .map_err(|e| WhisperStreamError::Io { source: e })?;
     Ok(())
 }
 
 #[cfg(feature = "coreml")]
 fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), WhisperStreamError> {
     let file = File::open(zip_path).map_err(|e| WhisperStreamError::Io { source: e })?;
-    let mut archive = ZipArchive::new(file).map_err(|e| WhisperStreamError::ModelFetch(format!("Failed to open zip archive '{}': {}", zip_path.display(), e)))?;
+    let mut archive = ZipArchive::new(file).map_err(|e| {
+        WhisperStreamError::ModelFetch(format!(
+            "Failed to open zip archive '{}': {}",
+            zip_path.display(),
+            e
+        ))
+    })?;
 
     for i in 0..archive.len() {
-        let mut file_in_zip = archive.by_index(i).map_err(|e| WhisperStreamError::ModelFetch(format!("Failed to access file in zip '{}': {}", zip_path.display(), e)))?;
+        let mut file_in_zip = archive.by_index(i).map_err(|e| {
+            WhisperStreamError::ModelFetch(format!(
+                "Failed to access file in zip '{}': {}",
+                zip_path.display(),
+                e
+            ))
+        })?;
         let outpath = match file_in_zip.enclosed_name() {
             Some(path) => dest_dir.join(path),
             None => continue, // Skip if path is risky (e.g. ../)
@@ -183,8 +231,10 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), WhisperStreamError
                     fs::create_dir_all(p).map_err(|e| WhisperStreamError::Io { source: e })?;
                 }
             }
-            let mut outfile = fs::File::create(&outpath).map_err(|e| WhisperStreamError::Io { source: e })?;
-            io::copy(&mut file_in_zip, &mut outfile).map_err(|e| WhisperStreamError::Io { source: e })?;
+            let mut outfile =
+                fs::File::create(&outpath).map_err(|e| WhisperStreamError::Io { source: e })?;
+            io::copy(&mut file_in_zip, &mut outfile)
+                .map_err(|e| WhisperStreamError::Io { source: e })?;
         }
     }
     Ok(())

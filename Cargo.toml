@@ -28,6 +28,7 @@ zip = "0.6"
 [features]
 default = []
 coreml = ["whisper-rs/coreml"]
+vulkan = ["whisper-rs/vulkan"]
 
 [[example]]
 name = "commandline"
