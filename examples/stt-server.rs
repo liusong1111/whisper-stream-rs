@@ -8,6 +8,8 @@ use clap::Parser;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver as BroadcastReceiver, Sender as BroadcastSender};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
@@ -78,6 +80,7 @@ struct AppState {
     // whisper_instance: Arc<Mutex<Option<WhisperInstance>>>,
     builder: WhisperStreamBuilder,
     tx: BroadcastSender<WhisperEvent>,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 struct WhisperClient {
@@ -91,6 +94,7 @@ impl AppState {
             // whisper_instance: Arc::new(Mutex::new(None)),
             builder,
             tx,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
     }
     // 系统启动时就启动
@@ -99,8 +103,13 @@ impl AppState {
         let _instance = self.builder.clone().build()?;
         let rx = _instance.rx;
         let tx = self.tx.clone();
+        let shutdown_flag = self.shutdown_flag.clone();
+
         tokio::task::spawn_blocking(move || {
             while let Ok(event) = rx.recv() {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    break;
+                }
                 let _ = tx.send(event.into());
             }
         });
@@ -140,6 +149,10 @@ impl AppState {
     //     let _ = instance.take();
     //     Ok(())
     // }
+
+    pub fn shutdown(&self) {
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+    }
 }
 
 async fn start_api_server(port: i16, _args: CliArgs, builder: WhisperStreamBuilder) {
@@ -153,13 +166,18 @@ async fn start_api_server(port: i16, _args: CliArgs, builder: WhisperStreamBuild
         // .route("/api/stt_status", get(stt_status_handler))
         .route("/api/stt_events", post(stt_events_handler))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = format!("127.0.0.1:{port}");
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     println!("listening on {}", addr);
+
+    let state_clone = state.clone();
     axum::serve(tcp_listener, app)
-        .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.unwrap() })
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c().await.unwrap();
+            state_clone.shutdown();
+        })
         .await
         .unwrap();
 }
